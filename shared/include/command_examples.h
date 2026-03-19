@@ -14,7 +14,7 @@ static constexpr NodeCommand kFlashCommands[] = {
     1,
     0,
     0,
-    80,
+    65,
   },
   {
     "Heavy Half",
@@ -25,7 +25,7 @@ static constexpr NodeCommand kFlashCommands[] = {
     1,
     0,
     0,
-    150,
+    120,
   },
   {
     "Double Tap 3Hz",
@@ -34,9 +34,9 @@ static constexpr NodeCommand kFlashCommands[] = {
     1,
     1,
     2,
-    333,
+    360,
     0,
-    90,
+    70,
   },
   {
     "Quad Skip",
@@ -45,9 +45,9 @@ static constexpr NodeCommand kFlashCommands[] = {
     2,
     1,
     4,
-    260,
-    -20,
-    70,
+    290,
+    -15,
+    55,
   },
   {
     "Riser 5x",
@@ -56,9 +56,9 @@ static constexpr NodeCommand kFlashCommands[] = {
     1,
     1,
     5,
-    360,
-    -45,
-    60,
+    390,
+    -35,
+    45,
   },
 };
 

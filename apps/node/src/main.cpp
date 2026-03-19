@@ -26,6 +26,10 @@ static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
 static constexpr uint32_t STARTUP_DELAY_MS = 500;
 static constexpr uint32_t CLOCK_SYNC_TIMEOUT_MS = 4000;
+static constexpr uint32_t SOFT_SYNC_MATCH_WINDOW_MS = 120;
+static constexpr uint32_t DUPLICATE_BEAT_GUARD_MS = 250;
+static constexpr int32_t SOFT_SYNC_MAX_CORRECTION_MS = 30;
+static constexpr int32_t HARD_SYNC_ERROR_MS = 180;
 static constexpr int FLASH_PIN = 26;
 static constexpr uint16_t BPM = 120;
 static constexpr uint8_t DEFAULT_BEATS_PER_BAR = 4;
@@ -59,11 +63,17 @@ struct BurstState {
 
 BurstState burst;
 bool remoteControlActive = false;
+bool awaitingRemoteClock = false;
 uint32_t lastRemoteCommandRevision = 0;
 uint32_t lastClockBeatSerial = 0;
 uint32_t lastClockSyncAtMs = 0;
 bool clockLocked = false;
 bool clockHoldoverAnnounced = false;
+uint32_t lastBeatRenderedAtMs = 0;
+uint8_t lastRenderedBeatInBar = 0;
+uint32_t lastRenderedBar = 0;
+uint8_t lastPrintedBeatInBar = 0;
+uint32_t lastPrintedBar = 0;
 
 portMUX_TYPE radioMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool hasPendingCommand = false;
@@ -75,6 +85,23 @@ void onBeat();
 
 uint32_t bpmToIntervalMs(uint16_t bpm) {
   return 60000UL / bpm;
+}
+
+void advanceBeatPosition(uint8_t beat, uint32_t bar, uint8_t& nextBeat, uint32_t& nextBar) {
+  nextBeat = beat + 1;
+  nextBar = bar;
+
+  if (nextBeat > beatsPerBar) {
+    nextBeat = 1;
+    nextBar++;
+  }
+}
+
+bool wasSameBeatRenderedRecently(uint8_t beat, uint32_t bar, uint32_t now) {
+  return lastBeatRenderedAtMs != 0 &&
+         (now - lastBeatRenderedAtMs) <= DUPLICATE_BEAT_GUARD_MS &&
+         lastRenderedBeatInBar == beat &&
+         lastRenderedBar == bar;
 }
 
 void applyCommand(const NodeCommand& command) {
@@ -142,6 +169,7 @@ void processPendingCommandMessage(const NodeCommandMessage& message) {
 
   applyCommand(message.command);
   remoteControlActive = true;
+  awaitingRemoteClock = true;
   lastRemoteCommandRevision = message.commandRevision;
 
   Serial.println();
@@ -157,23 +185,52 @@ void applyClockSync(const ClockSyncMessage& message) {
     return;
   }
 
+  const uint32_t now = millis();
   lastClockBeatSerial = message.beatSerial;
-  lastClockSyncAtMs = millis();
+  lastClockSyncAtMs = now;
   beatIntervalMs = bpmToIntervalMs(message.bpm);
   beatsPerBar = message.beatsPerBar;
+  awaitingRemoteClock = false;
+  if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
+    advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
+    nextBeatAtMs = lastBeatRenderedAtMs + beatIntervalMs;
+    clockLocked = true;
+    clockHoldoverAnnounced = false;
+    return;
+  }
+
+  const bool recentMatchingBeat =
+    wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now) &&
+    (now - lastBeatRenderedAtMs) <= SOFT_SYNC_MATCH_WINDOW_MS;
+
+  if (recentMatchingBeat) {
+    const uint32_t desiredNextBeatAtMs = now + beatIntervalMs;
+    const int32_t phaseErrorMs =
+      static_cast<int32_t>(desiredNextBeatAtMs) - static_cast<int32_t>(nextBeatAtMs);
+
+    if (abs(phaseErrorMs) <= HARD_SYNC_ERROR_MS) {
+      int32_t correctionMs = phaseErrorMs / 2;
+      if (correctionMs > SOFT_SYNC_MAX_CORRECTION_MS) {
+        correctionMs = SOFT_SYNC_MAX_CORRECTION_MS;
+      } else if (correctionMs < -SOFT_SYNC_MAX_CORRECTION_MS) {
+        correctionMs = -SOFT_SYNC_MAX_CORRECTION_MS;
+      }
+
+      nextBeatAtMs = static_cast<uint32_t>(static_cast<int32_t>(nextBeatAtMs) + correctionMs);
+      advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
+
+      clockLocked = true;
+      clockHoldoverAnnounced = false;
+      return;
+    }
+  }
+
   beatInBar = message.beatInBar;
   currentBar = message.currentBar;
-  if (!clockLocked || clockHoldoverAnnounced) {
-    Serial.printf("clock=sync beat=%u/%u bar=%lu bpm=%u\n",
-                  beatInBar,
-                  beatsPerBar,
-                  static_cast<unsigned long>(currentBar),
-                  static_cast<unsigned>(message.bpm));
-  }
   clockLocked = true;
   clockHoldoverAnnounced = false;
   onBeat();
-  nextBeatAtMs = millis() + beatIntervalMs;
+  nextBeatAtMs = now + beatIntervalMs;
 }
 
 void processPendingRadio() {
@@ -234,6 +291,7 @@ void selectProgram(size_t programIndex) {
   currentProgram = programIndex % kProgramCount;
   applyCommand(kPrograms[currentProgram]);
   remoteControlActive = false;
+  awaitingRemoteClock = false;
   printCurrentProgram();
 }
 
@@ -327,6 +385,28 @@ void printBurstLine(uint8_t count) {
   Serial.println();
 }
 
+void printBeatSummary(const NodeCommand& command, bool isTriggerBeat) {
+  if (lastPrintedBeatInBar == beatInBar && lastPrintedBar == currentBar) {
+    return;
+  }
+
+  lastPrintedBeatInBar = beatInBar;
+  lastPrintedBar = currentBar;
+
+  if (!isTriggerBeat) {
+    Serial.println("-");
+  } else if (command.effect == EffectType::BarBurst) {
+    printBurstLine(command.burstCount);
+  } else {
+    Serial.println("FLASH");
+  }
+
+  uint8_t nextBeat = beatInBar + 1;
+  if (nextBeat > beatsPerBar) {
+    Serial.println();
+  }
+}
+
 void serviceBurst() {
   const uint32_t now = millis();
 
@@ -357,26 +437,25 @@ void serviceBurst() {
 
 void onBeat() {
   const auto& command = activeCommand;
+  lastBeatRenderedAtMs = millis();
+  lastRenderedBeatInBar = beatInBar;
+  lastRenderedBar = currentBar;
   const bool isTriggerBar =
     (command.triggerEveryBars <= 1) || ((currentBar % command.triggerEveryBars) == 0);
   const bool isTriggerBeat =
     ((command.triggerBeat == 0) || (beatInBar == command.triggerBeat)) && isTriggerBar;
-  bool flashedOnBeat = false;
+  printBeatSummary(command, isTriggerBeat);
 
   switch (command.effect) {
     case EffectType::BeatPulse:
       if (isTriggerBeat) {
-        Serial.println("FLASH");
         renderer.flash100(command.flashDurationMs);
-        flashedOnBeat = true;
       }
       break;
 
     case EffectType::BarBurst:
       if (isTriggerBeat) {
-        printBurstLine(command.burstCount);
         startBurst(command);
-        flashedOnBeat = true;
       }
       break;
 
@@ -386,17 +465,12 @@ void onBeat() {
       break;
   }
 
-  if (!flashedOnBeat) {
-    Serial.println("-");
-  }
-
   globalBeat++;
   beatInBar++;
 
   if (beatInBar > beatsPerBar) {
     beatInBar = 1;
     currentBar++;
-    Serial.println();
   }
 }
 
@@ -406,10 +480,11 @@ void serviceClock() {
   if (clockLocked && lastClockSyncAtMs != 0 &&
       (now - lastClockSyncAtMs) >= CLOCK_SYNC_TIMEOUT_MS) {
     clockLocked = false;
-    if (!clockHoldoverAnnounced) {
-      Serial.println("clock=holdover");
-      clockHoldoverAnnounced = true;
-    }
+    clockHoldoverAnnounced = true;
+  }
+
+  if (remoteControlActive && awaitingRemoteClock) {
+    return;
   }
 
   while ((int32_t)(now - nextBeatAtMs) >= 0) {

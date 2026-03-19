@@ -207,6 +207,7 @@ The first transport step is now wired in and split cleanly:
 - `brain` sends `ClockSyncMessage` on every beat
 - `node` applies commands only when the revision changes
 - `node` keeps its local clock running, but regularly re-locks to the brain clock
+- small phase errors are trimmed softly on the next beat instead of always hard-resetting
 - if clock sync disappears for a few seconds, the node falls back to local holdover instead of stopping
 
 This is still intentionally simple:
@@ -214,8 +215,8 @@ This is still intentionally simple:
 - broadcast only
 - no pairing
 - no acknowledgements
-- hard resync on each beat
-- no resync smoothing yet
+- hard resync only when the phase is clearly off
+- basic soft trim is in place, smarter smoothing can come later
 
 ## V1 Scope
 
@@ -228,6 +229,6 @@ This is still intentionally simple:
 ## Next Steps
 
 1. Test the new clock lock between brain matrix and flashlight node on hardware.
-2. Add smoothing instead of hard phase reset on every sync packet.
+2. Refine the soft-sync strategy with measured latency and tighter phase heuristics.
 3. Add persistent default preset selection on the node.
 4. Add microphone input and beat detection on the brain.
