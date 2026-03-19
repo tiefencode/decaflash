@@ -6,7 +6,7 @@ Monorepo for the Decaflash cube system.
 
 V1 is intentionally small:
 
-- `brain` exists as a placeholder firmware for the ATOM Matrix controller
+- `brain` can already broadcast a demo `NodeCommandMessage` over ESP-NOW
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
 - microphone, ESP-NOW, and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
@@ -62,6 +62,23 @@ If PlatformIO does not pick the correct serial device automatically, specify the
 pio run -e node -t upload --upload-port /dev/cu.usbserial-XXXX
 ```
 
+Current local example mapping in this setup:
+
+```bash
+# Flashlight node
+/dev/cu.usbserial-B956E80C38
+
+# Brain
+/dev/cu.usbserial-2D52E72138
+```
+
+Example uploads with the currently connected devices:
+
+```bash
+pio run -e node -t upload --upload-port /dev/cu.usbserial-B956E80C38
+pio run -e brain -t upload --upload-port /dev/cu.usbserial-2D52E72138
+```
+
 ## Serial Monitor
 
 Open a serial monitor for the brain:
@@ -74,6 +91,13 @@ Open a serial monitor for the node:
 
 ```bash
 pio device monitor -e node
+```
+
+Example monitor commands with the current ports:
+
+```bash
+pio device monitor -e node --port /dev/cu.usbserial-B956E80C38
+pio device monitor -e brain --port /dev/cu.usbserial-2D52E72138
 ```
 
 ## Current Node Demo
@@ -164,6 +188,21 @@ auto message = makeNodeCommandMessage(
 ```
 
 The transport is still missing, but the shared message shape is now defined.
+
+## ESP-NOW Step
+
+The first transport step is now wired in:
+
+- `brain` broadcasts a demo `NodeCommandMessage` once per second
+- `node` listens for `NodeCommandMessage`
+- if the `targetNodeKind` matches, the node applies the received command as its new `activeCommand`
+
+This is still intentionally simple:
+
+- broadcast only
+- no pairing
+- no acknowledgements
+- no resync smoothing yet
 
 ## V1 Scope
 

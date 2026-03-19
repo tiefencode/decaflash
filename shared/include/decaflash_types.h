@@ -4,6 +4,8 @@
 
 namespace decaflash {
 
+static constexpr size_t kCommandNameLength = 24;
+
 enum class DeviceType : uint8_t {
   Brain = 0,
   Node = 1,
@@ -21,7 +23,7 @@ enum class EffectType : uint8_t {
 };
 
 struct NodeCommand {
-  const char* name;
+  char name[kCommandNameLength];
   EffectType effect;
   uint8_t intensity;
   uint8_t triggerEveryBars;

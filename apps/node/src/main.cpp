@@ -1,14 +1,19 @@
 #include <Arduino.h>
 
 #include "decaflash_types.h"
+#include "espnow_transport.h"
 #include "flashlight_renderer.h"
 #include "node_programs.h"
+#include "protocol.h"
 
 using decaflash::EffectType;
 using decaflash::NodeIdentity;
 using decaflash::NodeCommand;
+using decaflash::espnow_transport::initEspNow;
+using decaflash::espnow_transport::isValidHeader;
 using decaflash::node::kProgramCount;
 using decaflash::node::kPrograms;
+using decaflash::protocol::NodeCommandMessage;
 
 static constexpr NodeIdentity NODE_IDENTITY = {
   decaflash::DeviceType::Node,
@@ -50,9 +55,57 @@ struct BurstState {
 };
 
 BurstState burst;
+bool remoteControlActive = false;
+uint32_t lastRemoteCommandRevision = 0;
 
 uint32_t bpmToIntervalMs(uint16_t bpm) {
   return 60000UL / bpm;
+}
+
+void applyCommand(const NodeCommand& command) {
+  activeCommand = command;
+  effectStartedAtMs = millis();
+  nextBeatAtMs = effectStartedAtMs + beatIntervalMs;
+  beatInBar = 1;
+  globalBeat = 0;
+  currentBar = 1;
+  burst.active = false;
+  burst.remaining = 0;
+  renderer.allOff();
+}
+
+void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
+  (void)mac;
+
+  if (len != static_cast<int>(sizeof(NodeCommandMessage))) {
+    return;
+  }
+
+  NodeCommandMessage message = {};
+  memcpy(&message, data, sizeof(message));
+
+  if (!isValidHeader(message.header, decaflash::protocol::MessageType::NodeCommand)) {
+    return;
+  }
+
+  if (message.targetNodeKind != NODE_IDENTITY.nodeKind) {
+    return;
+  }
+
+  if (remoteControlActive && message.commandRevision == lastRemoteCommandRevision) {
+    return;
+  }
+
+  activeCommand = message.command;
+  beatIntervalMs = bpmToIntervalMs(message.bpm);
+  applyCommand(message.command);
+  remoteControlActive = true;
+  lastRemoteCommandRevision = message.commandRevision;
+
+  Serial.println();
+  Serial.println("-----");
+  Serial.printf("REMOTE: %s | %u BPM\n", activeCommand.name, message.bpm);
+  Serial.println("-----");
 }
 
 void printPrograms() {
@@ -83,15 +136,8 @@ void printHelp() {
 
 void selectProgram(size_t programIndex) {
   currentProgram = programIndex % kProgramCount;
-  activeCommand = kPrograms[currentProgram];
-  effectStartedAtMs = millis();
-  nextBeatAtMs = effectStartedAtMs + beatIntervalMs;
-  beatInBar = 1;
-  globalBeat = 0;
-  currentBar = 1;
-  burst.active = false;
-  burst.remaining = 0;
-  renderer.allOff();
+  applyCommand(kPrograms[currentProgram]);
+  remoteControlActive = false;
   printCurrentProgram();
 }
 
@@ -286,7 +332,18 @@ void setup() {
   Serial.println("controls=atom button");
   Serial.println("renderer=flashlight");
   Serial.printf("clock=%u bpm 4/4\n", BPM);
-  Serial.println("future=saved default + esp-now + rgb renderer");
+  const auto initResult = initEspNow();
+  const bool espNowOk = initResult.ok();
+  Serial.printf("wifi_set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
+  Serial.printf("wifi_start=%d\n", static_cast<int>(initResult.wifiStart));
+  Serial.printf("wifi_set_channel=%d\n", static_cast<int>(initResult.wifiSetChannel));
+  Serial.printf("esp_now_init=%d\n", static_cast<int>(initResult.espNowInit));
+  Serial.printf("esp_now=%s\n", espNowOk ? "ok" : "failed");
+  if (espNowOk) {
+    esp_now_register_recv_cb(onEspNowReceive);
+  }
+  Serial.println("mode=local demo + remote command receive");
+  Serial.println("future=saved default + rgb renderer");
   printPrograms();
   printHelp();
 
