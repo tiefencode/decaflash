@@ -26,6 +26,7 @@ V1 is intentionally small:
 The environment name `node` describes the device type, not a visual role.
 Right now the only implemented node hardware is a flashlight node.
 The node firmware is already structured so hardware-specific renderers can branch underneath the shared node logic.
+The current flashlight demo programs are also shaped like future brain commands, so local demos and remote control can share the same data model.
 
 ## Build
 
@@ -98,6 +99,42 @@ Timing:
 - `Double Tap 3Hz` fires a 2-hit burst on beat 1 of every bar with `333 ms` spacing
 - `Quad Skip` fires a 4-hit burst on beat 1 every second bar and tightens slightly inside the burst
 - `Riser 5x` fires a 5-hit burst on beat 1 of every bar and accelerates inside the burst
+
+## Command Model
+
+The node now runs against an active command instead of hardcoded behavior branches. That is the same shape the brain can later send over radio.
+
+```cpp
+struct NodeCommand {
+  const char* name;
+  EffectType effect;
+  uint8_t intensity;
+  uint8_t triggerEveryBars;
+  uint8_t triggerBeat;
+  uint8_t burstCount;
+  uint16_t burstIntervalMs;
+  int16_t burstIntervalStepMs;
+  uint16_t flashDurationMs;
+};
+```
+
+Example for the current `Quad Skip` style command:
+
+```cpp
+NodeCommand quadSkip = {
+  "Quad Skip",
+  EffectType::BarBurst,
+  255,
+  2,
+  1,
+  4,
+  260,
+  -20,
+  70
+};
+```
+
+The node keeps one `activeCommand` in memory and renders that command locally. Later the brain can replace that same structure with live scene data.
 
 ## V1 Scope
 

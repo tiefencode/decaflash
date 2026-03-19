@@ -20,7 +20,7 @@ enum class EffectType : uint8_t {
   BarBurst = 2,
 };
 
-struct DefaultPreset {
+struct NodeCommand {
   const char* name;
   EffectType effect;
   uint8_t intensity;
@@ -31,6 +31,8 @@ struct DefaultPreset {
   int16_t burstIntervalStepMs;
   uint16_t flashDurationMs;
 };
+
+using DefaultPreset = NodeCommand;
 
 struct NodeIdentity {
   DeviceType deviceType;

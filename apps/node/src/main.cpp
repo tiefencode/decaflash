@@ -4,9 +4,9 @@
 #include "flashlight_renderer.h"
 #include "node_programs.h"
 
-using decaflash::DefaultPreset;
 using decaflash::EffectType;
 using decaflash::NodeIdentity;
+using decaflash::NodeCommand;
 using decaflash::node::kProgramCount;
 using decaflash::node::kPrograms;
 
@@ -24,6 +24,7 @@ static constexpr uint16_t BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 
 size_t currentProgram = 0;
+NodeCommand activeCommand = kPrograms[0];
 
 bool buttonPressed = false;
 bool longPressHandled = false;
@@ -63,12 +64,11 @@ void printPrograms() {
 }
 
 void printCurrentProgram() {
-  const auto& program = kPrograms[currentProgram];
   Serial.println();
   Serial.println("-----");
   Serial.printf("PROGRAM %u: %s | %u BPM\n",
                 static_cast<unsigned>(currentProgram + 1),
-                program.name,
+                activeCommand.name,
                 BPM);
   Serial.println("-----");
 }
@@ -83,6 +83,7 @@ void printHelp() {
 
 void selectProgram(size_t programIndex) {
   currentProgram = programIndex % kProgramCount;
+  activeCommand = kPrograms[currentProgram];
   effectStartedAtMs = millis();
   nextBeatAtMs = effectStartedAtMs + beatIntervalMs;
   beatInBar = 1;
@@ -156,9 +157,9 @@ uint32_t clampBurstInterval(int32_t intervalMs) {
   return static_cast<uint32_t>(intervalMs);
 }
 
-void startBurst(const DefaultPreset& program) {
-  const uint8_t count = program.burstCount;
-  const uint16_t intervalMs = program.burstIntervalMs;
+void startBurst(const NodeCommand& command) {
+  const uint8_t count = command.burstCount;
+  const uint16_t intervalMs = command.burstIntervalMs;
 
   if (count == 0) {
     return;
@@ -168,8 +169,8 @@ void startBurst(const DefaultPreset& program) {
   burst.remaining = count;
   burst.intervalMs = intervalMs;
   burst.nextFlashAtMs = millis();
-  burst.intervalStepMs = program.burstIntervalStepMs;
-  burst.flashDurationMs = program.flashDurationMs;
+  burst.intervalStepMs = command.burstIntervalStepMs;
+  burst.flashDurationMs = command.flashDurationMs;
 }
 
 void printBurstLine(uint8_t count) {
@@ -213,26 +214,26 @@ void serviceBurst() {
 }
 
 void onBeat() {
-  const auto& program = kPrograms[currentProgram];
+  const auto& command = activeCommand;
   const bool isTriggerBar =
-    (program.triggerEveryBars <= 1) || ((currentBar % program.triggerEveryBars) == 0);
+    (command.triggerEveryBars <= 1) || ((currentBar % command.triggerEveryBars) == 0);
   const bool isTriggerBeat =
-    ((program.triggerBeat == 0) || (beatInBar == program.triggerBeat)) && isTriggerBar;
+    ((command.triggerBeat == 0) || (beatInBar == command.triggerBeat)) && isTriggerBar;
   bool flashedOnBeat = false;
 
-  switch (program.effect) {
+  switch (command.effect) {
     case EffectType::BeatPulse:
       if (isTriggerBeat) {
         Serial.println("FLASH");
-        renderer.flash100(program.flashDurationMs);
+        renderer.flash100(command.flashDurationMs);
         flashedOnBeat = true;
       }
       break;
 
     case EffectType::BarBurst:
       if (isTriggerBeat) {
-        printBurstLine(program.burstCount);
-        startBurst(program);
+        printBurstLine(command.burstCount);
+        startBurst(command);
         flashedOnBeat = true;
       }
       break;
