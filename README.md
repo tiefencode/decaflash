@@ -6,9 +6,9 @@ Monorepo for the Decaflash cube system.
 
 V1 is intentionally small:
 
-- `brain` can already broadcast a demo `NodeCommandMessage` over ESP-NOW
+- `brain` can already broadcast demo commands and a separate beat clock over ESP-NOW
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
-- microphone, ESP-NOW, and RGB strip nodes come later
+- microphone and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
 
 ## Project Structure
@@ -128,19 +128,7 @@ Timing:
 
 The node now runs against an active command instead of hardcoded behavior branches. That is the same shape the brain can later send over radio.
 
-```cpp
-struct NodeCommand {
-  const char* name;
-  EffectType effect;
-  uint8_t intensity;
-  uint8_t triggerEveryBars;
-  uint8_t triggerBeat;
-  uint8_t burstCount;
-  uint16_t burstIntervalMs;
-  int16_t burstIntervalStepMs;
-  uint16_t flashDurationMs;
-};
-```
+See [`decaflash_types.h`](/Users/tiefencode/Projekte/decaflash/shared/include/decaflash_types.h) for the current shared shape.
 
 Example for the current `Quad Skip` style command:
 
@@ -158,7 +146,7 @@ NodeCommand quadSkip = {
 };
 ```
 
-The node keeps one `activeCommand` in memory and renders that command locally. Later the brain can replace that same structure with live scene data.
+The node keeps one `activeCommand` in memory and renders that command locally. The important part now is that command data is separate from timing data.
 
 ## Protocol Model
 
@@ -168,53 +156,78 @@ On top of `NodeCommand`, the shared protocol now defines message envelopes in [`
 struct NodeCommandMessage {
   MessageHeader header;
   uint32_t commandRevision;
-  uint16_t bpm;
-  uint8_t beatsPerBar;
   NodeKind targetNodeKind;
   NodeCommand command;
 };
+
+struct ClockSyncMessage {
+  MessageHeader header;
+  uint32_t clockRevision;
+  uint32_t beatSerial;
+  uint16_t bpm;
+  uint8_t beatsPerBar;
+  uint8_t beatInBar;
+  uint32_t currentBar;
+};
 ```
 
-That lets the brain send a full musical command such as:
+That lets the brain send two different things:
+
+- `NodeCommandMessage`: what a node should do
+- `ClockSyncMessage`: when the shared musical clock currently is
+
+Example command send:
 
 ```cpp
 auto message = makeNodeCommandMessage(
   NodeKind::Flashlight,
-  kPrograms[3],  // Quad Skip
-  120,
-  4,
+  kFlashCommands[3],  // Quad Skip
   1
 );
 ```
 
-The transport is still missing, but the shared message shape is now defined.
+Example clock send:
+
+```cpp
+auto sync = makeClockSyncMessage(
+  1,    // clock revision
+  42,   // beat serial
+  120,  // bpm
+  4,    // beats per bar
+  1,    // beat in bar
+  8     // current bar
+);
+```
 
 ## ESP-NOW Step
 
-The first transport step is now wired in:
+The first transport step is now wired in and split cleanly:
 
-- `brain` broadcasts a demo `NodeCommandMessage` once per second
-- `node` listens for `NodeCommandMessage`
-- if the `targetNodeKind` matches, the node applies the received command as its new `activeCommand`
+- `brain` sends `NodeCommandMessage` on mode changes and occasional refresh
+- `brain` sends `ClockSyncMessage` on every beat
+- `node` applies commands only when the revision changes
+- `node` keeps its local clock running, but regularly re-locks to the brain clock
+- if clock sync disappears for a few seconds, the node falls back to local holdover instead of stopping
 
 This is still intentionally simple:
 
 - broadcast only
 - no pairing
 - no acknowledgements
+- hard resync on each beat
 - no resync smoothing yet
 
 ## V1 Scope
 
 - standalone flashlight node first
 - local test patterns on an internal beat clock
-- no radio yet
+- initial ESP-NOW master/slave transport
 - no microphone yet
 - no beat detection from audio yet
 
 ## Next Steps
 
-1. Add persistent default preset selection on the node.
-2. Decide whether long button press should store default, blackout, or both.
-3. Add ESP-NOW communication between brain and node.
+1. Test the new clock lock between brain matrix and flashlight node on hardware.
+2. Add smoothing instead of hard phase reset on every sync packet.
+3. Add persistent default preset selection on the node.
 4. Add microphone input and beat detection on the brain.

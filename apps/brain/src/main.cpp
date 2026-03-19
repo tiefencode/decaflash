@@ -12,6 +12,7 @@ using decaflash::examples::kFlashCommands;
 using decaflash::examples::kFlashQuadSkip;
 using decaflash::espnow_transport::ensureBroadcastPeer;
 using decaflash::espnow_transport::initEspNow;
+using decaflash::protocol::makeClockSyncMessage;
 using decaflash::protocol::makeNodeCommandMessage;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
@@ -23,9 +24,12 @@ static constexpr uint32_t UI_MODE_DISPLAY_MS = 3000;
 uint32_t nextSendAtMs = 0;
 bool espNowReady = false;
 uint32_t commandRevision = 1;
+uint32_t clockRevision = 1;
+uint32_t beatSerial = 0;
 uint32_t beatIntervalMs = 0;
 uint32_t nextBeatAtMs = 0;
 uint8_t beatInBar = 1;
+uint32_t currentBar = 1;
 uint32_t matrixOffAtMs = 0;
 uint32_t uiFeedbackUntilMs = 0;
 size_t currentModeIndex = 0;
@@ -79,14 +83,39 @@ void drawBeatFrame(uint8_t beat) {
 }
 
 void onBeat() {
+  const uint8_t currentBeat = beatInBar;
+
   if (millis() >= uiFeedbackUntilMs) {
-    drawBeatFrame(beatInBar);
+    drawBeatFrame(currentBeat);
   }
-  Serial.printf("beat=%u/%u\n", beatInBar, BEATS_PER_BAR);
+  Serial.printf("beat=%u/%u\n", currentBeat, BEATS_PER_BAR);
+
+  if (espNowReady) {
+    const auto sync = makeClockSyncMessage(
+      clockRevision,
+      ++beatSerial,
+      BPM,
+      BEATS_PER_BAR,
+      currentBeat,
+      currentBar
+    );
+
+    const auto result = esp_now_send(
+      decaflash::espnow_transport::kBroadcastMac,
+      reinterpret_cast<const uint8_t*>(&sync),
+      sizeof(sync)
+    );
+
+    Serial.printf("send=clock_sync result=%d beat=%u bar=%lu\n",
+                  result,
+                  currentBeat,
+                  static_cast<unsigned long>(currentBar));
+  }
 
   beatInBar++;
   if (beatInBar > BEATS_PER_BAR) {
     beatInBar = 1;
+    currentBar++;
     Serial.println();
   }
 }
@@ -99,8 +128,6 @@ void sendCurrentCommand() {
   const auto message = makeNodeCommandMessage(
     decaflash::NodeKind::Flashlight,
     kFlashCommands[currentModeIndex],
-    120,
-    4,
     commandRevision
   );
 
@@ -139,7 +166,7 @@ void setup() {
   Serial.println();
   Serial.println("Decaflash Brain V1");
   Serial.printf("device_type=%u\n", static_cast<unsigned>(DEVICE_TYPE));
-  const auto message = makeNodeCommandMessage(decaflash::NodeKind::Flashlight, kFlashQuadSkip, 120, 4, 1);
+  const auto message = makeNodeCommandMessage(decaflash::NodeKind::Flashlight, kFlashQuadSkip, 1);
   Serial.printf("protocol=dcfl/v%u\n", message.header.version);
   Serial.printf("example_command=%s\n", message.command.name);
 

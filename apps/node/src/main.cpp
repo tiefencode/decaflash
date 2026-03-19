@@ -13,6 +13,7 @@ using decaflash::espnow_transport::initEspNow;
 using decaflash::espnow_transport::isValidHeader;
 using decaflash::node::kProgramCount;
 using decaflash::node::kPrograms;
+using decaflash::protocol::ClockSyncMessage;
 using decaflash::protocol::NodeCommandMessage;
 
 static constexpr NodeIdentity NODE_IDENTITY = {
@@ -24,9 +25,10 @@ static constexpr int BUTTON_PIN = 39;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
 static constexpr uint32_t STARTUP_DELAY_MS = 500;
+static constexpr uint32_t CLOCK_SYNC_TIMEOUT_MS = 4000;
 static constexpr int FLASH_PIN = 26;
 static constexpr uint16_t BPM = 120;
-static constexpr uint8_t BEATS_PER_BAR = 4;
+static constexpr uint8_t DEFAULT_BEATS_PER_BAR = 4;
 
 size_t currentProgram = 0;
 NodeCommand activeCommand = kPrograms[0];
@@ -43,6 +45,7 @@ uint32_t beatIntervalMs = 0;
 uint32_t globalBeat = 0;
 uint32_t currentBar = 1;
 uint8_t beatInBar = 1;
+uint8_t beatsPerBar = DEFAULT_BEATS_PER_BAR;
 FlashlightRenderer renderer(FLASH_PIN);
 
 struct BurstState {
@@ -57,6 +60,18 @@ struct BurstState {
 BurstState burst;
 bool remoteControlActive = false;
 uint32_t lastRemoteCommandRevision = 0;
+uint32_t lastClockBeatSerial = 0;
+uint32_t lastClockSyncAtMs = 0;
+bool clockLocked = false;
+bool clockHoldoverAnnounced = false;
+
+portMUX_TYPE radioMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool hasPendingCommand = false;
+volatile bool hasPendingClockSync = false;
+NodeCommandMessage pendingCommandMessage = {};
+ClockSyncMessage pendingClockSyncMessage = {};
+
+void onBeat();
 
 uint32_t bpmToIntervalMs(uint16_t bpm) {
   return 60000UL / bpm;
@@ -65,29 +80,58 @@ uint32_t bpmToIntervalMs(uint16_t bpm) {
 void applyCommand(const NodeCommand& command) {
   activeCommand = command;
   effectStartedAtMs = millis();
-  nextBeatAtMs = effectStartedAtMs + beatIntervalMs;
-  beatInBar = 1;
-  globalBeat = 0;
-  currentBar = 1;
   burst.active = false;
   burst.remaining = 0;
   renderer.allOff();
 }
 
+void stageIncomingCommand(const NodeCommandMessage& message) {
+  portENTER_CRITICAL(&radioMux);
+  pendingCommandMessage = message;
+  hasPendingCommand = true;
+  portEXIT_CRITICAL(&radioMux);
+}
+
+void stageIncomingClockSync(const ClockSyncMessage& message) {
+  portENTER_CRITICAL(&radioMux);
+  pendingClockSyncMessage = message;
+  hasPendingClockSync = true;
+  portEXIT_CRITICAL(&radioMux);
+}
+
 void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
   (void)mac;
 
-  if (len != static_cast<int>(sizeof(NodeCommandMessage))) {
+  if (len < static_cast<int>(sizeof(decaflash::protocol::MessageHeader))) {
     return;
   }
 
-  NodeCommandMessage message = {};
-  memcpy(&message, data, sizeof(message));
+  decaflash::protocol::MessageHeader header = {};
+  memcpy(&header, data, sizeof(header));
 
-  if (!isValidHeader(message.header, decaflash::protocol::MessageType::NodeCommand)) {
+  if (header.type == decaflash::protocol::MessageType::NodeCommand &&
+      len == static_cast<int>(sizeof(NodeCommandMessage))) {
+    NodeCommandMessage message = {};
+    memcpy(&message, data, sizeof(message));
+    if (!isValidHeader(message.header, decaflash::protocol::MessageType::NodeCommand)) {
+      return;
+    }
+    stageIncomingCommand(message);
     return;
   }
 
+  if (header.type == decaflash::protocol::MessageType::ClockSync &&
+      len == static_cast<int>(sizeof(ClockSyncMessage))) {
+    ClockSyncMessage message = {};
+    memcpy(&message, data, sizeof(message));
+    if (!isValidHeader(message.header, decaflash::protocol::MessageType::ClockSync)) {
+      return;
+    }
+    stageIncomingClockSync(message);
+  }
+}
+
+void processPendingCommandMessage(const NodeCommandMessage& message) {
   if (message.targetNodeKind != NODE_IDENTITY.nodeKind) {
     return;
   }
@@ -96,16 +140,68 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
     return;
   }
 
-  activeCommand = message.command;
-  beatIntervalMs = bpmToIntervalMs(message.bpm);
   applyCommand(message.command);
   remoteControlActive = true;
   lastRemoteCommandRevision = message.commandRevision;
 
   Serial.println();
   Serial.println("-----");
-  Serial.printf("REMOTE: %s | %u BPM\n", activeCommand.name, message.bpm);
+  Serial.printf("REMOTE: %s | %u BPM\n",
+                activeCommand.name,
+                beatIntervalMs == 0 ? BPM : static_cast<unsigned>(60000UL / beatIntervalMs));
   Serial.println("-----");
+}
+
+void applyClockSync(const ClockSyncMessage& message) {
+  if (message.beatSerial == lastClockBeatSerial) {
+    return;
+  }
+
+  lastClockBeatSerial = message.beatSerial;
+  lastClockSyncAtMs = millis();
+  beatIntervalMs = bpmToIntervalMs(message.bpm);
+  beatsPerBar = message.beatsPerBar;
+  beatInBar = message.beatInBar;
+  currentBar = message.currentBar;
+  if (!clockLocked || clockHoldoverAnnounced) {
+    Serial.printf("clock=sync beat=%u/%u bar=%lu bpm=%u\n",
+                  beatInBar,
+                  beatsPerBar,
+                  static_cast<unsigned long>(currentBar),
+                  static_cast<unsigned>(message.bpm));
+  }
+  clockLocked = true;
+  clockHoldoverAnnounced = false;
+  onBeat();
+  nextBeatAtMs = millis() + beatIntervalMs;
+}
+
+void processPendingRadio() {
+  bool hadCommand = false;
+  bool hadClockSync = false;
+  NodeCommandMessage commandMessage = {};
+  ClockSyncMessage clockMessage = {};
+
+  portENTER_CRITICAL(&radioMux);
+  if (hasPendingCommand) {
+    commandMessage = pendingCommandMessage;
+    hasPendingCommand = false;
+    hadCommand = true;
+  }
+  if (hasPendingClockSync) {
+    clockMessage = pendingClockSyncMessage;
+    hasPendingClockSync = false;
+    hadClockSync = true;
+  }
+  portEXIT_CRITICAL(&radioMux);
+
+  if (hadCommand) {
+    processPendingCommandMessage(commandMessage);
+  }
+
+  if (hadClockSync) {
+    applyClockSync(clockMessage);
+  }
 }
 
 void printPrograms() {
@@ -122,7 +218,7 @@ void printCurrentProgram() {
   Serial.printf("PROGRAM %u: %s | %u BPM\n",
                 static_cast<unsigned>(currentProgram + 1),
                 activeCommand.name,
-                BPM);
+                beatIntervalMs == 0 ? BPM : static_cast<unsigned>(60000UL / beatIntervalMs));
   Serial.println("-----");
 }
 
@@ -297,7 +393,7 @@ void onBeat() {
   globalBeat++;
   beatInBar++;
 
-  if (beatInBar > BEATS_PER_BAR) {
+  if (beatInBar > beatsPerBar) {
     beatInBar = 1;
     currentBar++;
     Serial.println();
@@ -306,6 +402,15 @@ void onBeat() {
 
 void serviceClock() {
   const uint32_t now = millis();
+
+  if (clockLocked && lastClockSyncAtMs != 0 &&
+      (now - lastClockSyncAtMs) >= CLOCK_SYNC_TIMEOUT_MS) {
+    clockLocked = false;
+    if (!clockHoldoverAnnounced) {
+      Serial.println("clock=holdover");
+      clockHoldoverAnnounced = true;
+    }
+  }
 
   while ((int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();
@@ -328,10 +433,12 @@ void setup() {
     static_cast<unsigned>(NODE_IDENTITY.nodeKind)
   );
   beatIntervalMs = bpmToIntervalMs(BPM);
+  beatsPerBar = DEFAULT_BEATS_PER_BAR;
   Serial.println("runtime=standalone flashlight demo");
   Serial.println("controls=atom button");
   Serial.println("renderer=flashlight");
-  Serial.printf("clock=%u bpm 4/4\n", BPM);
+  Serial.printf("clock=%u bpm %u/4\n", BPM, beatsPerBar);
+  nextBeatAtMs = millis() + beatIntervalMs;
   const auto initResult = initEspNow();
   const bool espNowOk = initResult.ok();
   Serial.printf("wifi_set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
@@ -351,6 +458,7 @@ void setup() {
 }
 
 void loop() {
+  processPendingRadio();
   serviceButton();
   serviceClock();
   serviceBurst();

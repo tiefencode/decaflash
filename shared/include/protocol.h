@@ -10,6 +10,7 @@ static constexpr uint32_t kProtocolMagic = 0x4443464C;  // DCFL
 enum class MessageType : uint8_t {
   NodeCommand = 1,
   NodeStatus = 2,
+  ClockSync = 3,
 };
 
 struct MessageHeader {
@@ -22,11 +23,8 @@ struct MessageHeader {
 struct NodeCommandMessage {
   MessageHeader header;
   uint32_t commandRevision;
-  uint16_t bpm;
-  uint8_t beatsPerBar;
-  uint8_t reserved0;
   NodeKind targetNodeKind;
-  uint8_t reserved1[3];
+  uint8_t reserved0[3];
   NodeCommand command;
 };
 
@@ -37,6 +35,16 @@ struct NodeStatusMessage {
   uint8_t beatsPerBar;
   uint8_t currentProgramIndex;
   uint32_t uptimeMs;
+};
+
+struct ClockSyncMessage {
+  MessageHeader header;
+  uint32_t clockRevision;
+  uint32_t beatSerial;
+  uint16_t bpm;
+  uint8_t beatsPerBar;
+  uint8_t beatInBar;
+  uint32_t currentBar;
 };
 
 constexpr MessageHeader makeHeader(MessageType type) {
@@ -51,16 +59,11 @@ constexpr MessageHeader makeHeader(MessageType type) {
 constexpr NodeCommandMessage makeNodeCommandMessage(
   NodeKind targetNodeKind,
   const NodeCommand& command,
-  uint16_t bpm,
-  uint8_t beatsPerBar,
   uint32_t commandRevision
 ) {
   return NodeCommandMessage{
     makeHeader(MessageType::NodeCommand),
     commandRevision,
-    bpm,
-    beatsPerBar,
-    0,
     targetNodeKind,
     {0, 0, 0},
     command,
@@ -81,6 +84,25 @@ constexpr NodeStatusMessage makeNodeStatusMessage(
     beatsPerBar,
     currentProgramIndex,
     uptimeMs,
+  };
+}
+
+constexpr ClockSyncMessage makeClockSyncMessage(
+  uint32_t clockRevision,
+  uint32_t beatSerial,
+  uint16_t bpm,
+  uint8_t beatsPerBar,
+  uint8_t beatInBar,
+  uint32_t currentBar
+) {
+  return ClockSyncMessage{
+    makeHeader(MessageType::ClockSync),
+    clockRevision,
+    beatSerial,
+    bpm,
+    beatsPerBar,
+    beatInBar,
+    currentBar,
   };
 }
 
