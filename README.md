@@ -136,6 +136,35 @@ NodeCommand quadSkip = {
 
 The node keeps one `activeCommand` in memory and renders that command locally. Later the brain can replace that same structure with live scene data.
 
+## Protocol Model
+
+On top of `NodeCommand`, the shared protocol now defines message envelopes in [`protocol.h`](/Users/tiefencode/Projekte/decaflash/shared/include/protocol.h):
+
+```cpp
+struct NodeCommandMessage {
+  MessageHeader header;
+  uint32_t commandRevision;
+  uint16_t bpm;
+  uint8_t beatsPerBar;
+  NodeKind targetNodeKind;
+  NodeCommand command;
+};
+```
+
+That lets the brain send a full musical command such as:
+
+```cpp
+auto message = makeNodeCommandMessage(
+  NodeKind::Flashlight,
+  kPrograms[3],  // Quad Skip
+  120,
+  4,
+  1
+);
+```
+
+The transport is still missing, but the shared message shape is now defined.
+
 ## V1 Scope
 
 - standalone flashlight node first
