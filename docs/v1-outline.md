@@ -17,9 +17,9 @@ V1 focuses on the flashlight node as a standalone device.
 ## Node V1 goals
 
 - boot reliably
-- run three clear flashlight base programs locally
+- run three musically useful flashlight programs locally
 - allow local mode switching with the ATOM button
-- keep hardware-specific logic inside the node firmware
+- keep shared node logic separate from hardware-specific rendering
 - prepare shared types for later radio commands
 
 ## Next steps

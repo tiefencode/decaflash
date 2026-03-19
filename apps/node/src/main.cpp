@@ -1,31 +1,27 @@
 #include <Arduino.h>
 
 #include "decaflash_types.h"
+#include "flashlight_renderer.h"
+#include "node_programs.h"
 
 using decaflash::DefaultPreset;
-using decaflash::DeviceType;
 using decaflash::EffectType;
-using decaflash::NodeKind;
+using decaflash::NodeIdentity;
+using decaflash::node::kProgramCount;
+using decaflash::node::kPrograms;
 
-static constexpr DeviceType DEVICE_TYPE = DeviceType::Node;
-static constexpr NodeKind NODE_KIND = NodeKind::Flashlight;
+static constexpr NodeIdentity NODE_IDENTITY = {
+  decaflash::DeviceType::Node,
+  decaflash::NodeKind::Flashlight,
+};
 
-static constexpr int FLASH_PIN = 26;
 static constexpr int BUTTON_PIN = 39;
-static constexpr uint8_t PRESET_SHORT_100 = 1;
-static constexpr uint16_t FLASH_MS = 240;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
 static constexpr uint32_t STARTUP_DELAY_MS = 500;
-static constexpr uint16_t FAST_FLASH_INTERVAL_MS = 333;
-
-static constexpr DefaultPreset PROGRAMS[] = {
-  { "Flash 3Hz", EffectType::Strobe, 255, FAST_FLASH_INTERVAL_MS },
-  { "Pulse Slow", EffectType::PulseSlow, 255, 900 },
-  { "Strobe", EffectType::Strobe, 255, 120 },
-};
-
-static constexpr size_t PROGRAM_COUNT = sizeof(PROGRAMS) / sizeof(PROGRAMS[0]);
+static constexpr int FLASH_PIN = 26;
+static constexpr uint16_t BPM = 120;
+static constexpr uint8_t BEATS_PER_BAR = 4;
 
 size_t currentProgram = 0;
 
@@ -36,62 +32,45 @@ uint32_t buttonPressedAtMs = 0;
 bool lastButtonLevel = HIGH;
 
 uint32_t effectStartedAtMs = 0;
-uint32_t nextPulseAtMs = 0;
-bool flashlightEnabled = false;
+uint32_t nextBeatAtMs = 0;
+uint32_t beatIntervalMs = 0;
+uint32_t globalBeat = 0;
+uint32_t currentBar = 1;
+uint8_t beatInBar = 1;
+FlashlightRenderer renderer(FLASH_PIN);
 
-void hardOff() {
-  pinMode(FLASH_PIN, OUTPUT);
-  digitalWrite(FLASH_PIN, LOW);
-  delay(8);
-}
+struct BurstState {
+  bool active = false;
+  uint8_t remaining = 0;
+  uint32_t intervalMs = 0;
+  uint32_t nextFlashAtMs = 0;
+  int16_t intervalStepMs = 0;
+  uint16_t flashDurationMs = 120;
+};
 
-void sendFlashPreset(uint8_t preset) {
-  hardOff();
+BurstState burst;
 
-  for (uint8_t i = 0; i < preset; ++i) {
-    digitalWrite(FLASH_PIN, LOW);
-    delayMicroseconds(4);
-    digitalWrite(FLASH_PIN, HIGH);
-    delayMicroseconds(4);
-  }
-}
-
-void setFlashlightEnabled(bool enabled) {
-  if (enabled == flashlightEnabled) {
-    return;
-  }
-
-  if (enabled) {
-    sendFlashPreset(PRESET_SHORT_100);
-  } else {
-    hardOff();
-  }
-
-  flashlightEnabled = enabled;
-}
-
-void fireFlashPulse() {
-  sendFlashPreset(PRESET_SHORT_100);
-  delay(FLASH_MS);
-  hardOff();
-  flashlightEnabled = false;
+uint32_t bpmToIntervalMs(uint16_t bpm) {
+  return 60000UL / bpm;
 }
 
 void printPrograms() {
   Serial.println("programs:");
 
-  for (size_t i = 0; i < PROGRAM_COUNT; ++i) {
-    Serial.printf("  %u -> %s\n", static_cast<unsigned>(i + 1), PROGRAMS[i].name);
+  for (size_t i = 0; i < kProgramCount; ++i) {
+    Serial.printf("  %u -> %s\n", static_cast<unsigned>(i + 1), kPrograms[i].name);
   }
 }
 
 void printCurrentProgram() {
-  const auto& program = PROGRAMS[currentProgram];
-  Serial.printf(
-    "program=%u \"%s\"\n",
-    static_cast<unsigned>(currentProgram + 1),
-    program.name
-  );
+  const auto& program = kPrograms[currentProgram];
+  Serial.println();
+  Serial.println("-----");
+  Serial.printf("PROGRAM %u: %s | %u BPM\n",
+                static_cast<unsigned>(currentProgram + 1),
+                program.name,
+                BPM);
+  Serial.println("-----");
 }
 
 void printHelp() {
@@ -103,24 +82,29 @@ void printHelp() {
 }
 
 void selectProgram(size_t programIndex) {
-  currentProgram = programIndex % PROGRAM_COUNT;
+  currentProgram = programIndex % kProgramCount;
   effectStartedAtMs = millis();
-  nextPulseAtMs = effectStartedAtMs;
-  flashlightEnabled = false;
-  hardOff();
+  nextBeatAtMs = effectStartedAtMs + beatIntervalMs;
+  beatInBar = 1;
+  globalBeat = 0;
+  currentBar = 1;
+  burst.active = false;
+  burst.remaining = 0;
+  renderer.allOff();
   printCurrentProgram();
 }
 
 void selectNextProgram() {
-  selectProgram((currentProgram + 1) % PROGRAM_COUNT);
+  selectProgram((currentProgram + 1) % kProgramCount);
 }
 
 void outputOffFromButton() {
   Serial.println("button=long_press");
-  hardOff();
-  flashlightEnabled = false;
+  renderer.allOff();
   effectStartedAtMs = millis();
-  nextPulseAtMs = effectStartedAtMs;
+  nextBeatAtMs = effectStartedAtMs + beatIntervalMs;
+  burst.active = false;
+  burst.remaining = 0;
   Serial.println("output=off");
 }
 
@@ -164,33 +148,121 @@ void serviceButton() {
   }
 }
 
-void serviceProgram() {
-  const auto& program = PROGRAMS[currentProgram];
+uint32_t clampBurstInterval(int32_t intervalMs) {
+  if (intervalMs < 80) {
+    return 80;
+  }
+
+  return static_cast<uint32_t>(intervalMs);
+}
+
+void startBurst(const DefaultPreset& program) {
+  const uint8_t count = program.burstCount;
+  const uint16_t intervalMs = program.burstIntervalMs;
+
+  if (count == 0) {
+    return;
+  }
+
+  burst.active = true;
+  burst.remaining = count;
+  burst.intervalMs = intervalMs;
+  burst.nextFlashAtMs = millis();
+  burst.intervalStepMs = program.burstIntervalStepMs;
+  burst.flashDurationMs = program.flashDurationMs;
+}
+
+void printBurstLine(uint8_t count) {
+  for (uint8_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      Serial.print(" ");
+    }
+
+    Serial.print("FLASH");
+  }
+
+  Serial.println();
+}
+
+void serviceBurst() {
   const uint32_t now = millis();
 
-  switch (program.effect) {
-    case EffectType::On:
-      setFlashlightEnabled(true);
-      break;
+  if (!burst.active) {
+    return;
+  }
 
-    case EffectType::PulseSlow:
-      if ((int32_t)(now - nextPulseAtMs) >= 0) {
-        fireFlashPulse();
-        nextPulseAtMs = millis() + program.intervalMs;
+  if ((int32_t)(now - burst.nextFlashAtMs) < 0) {
+    return;
+  }
+
+  renderer.flash100(burst.flashDurationMs);
+
+  if (burst.remaining > 0) {
+    burst.remaining--;
+  }
+
+  if (burst.remaining == 0) {
+    burst.active = false;
+    return;
+  }
+
+  burst.intervalMs = clampBurstInterval(
+    static_cast<int32_t>(burst.intervalMs) + burst.intervalStepMs
+  );
+  burst.nextFlashAtMs = millis() + burst.intervalMs;
+}
+
+void onBeat() {
+  const auto& program = kPrograms[currentProgram];
+  const bool isTriggerBar =
+    (program.triggerEveryBars <= 1) || ((currentBar % program.triggerEveryBars) == 0);
+  const bool isTriggerBeat =
+    ((program.triggerBeat == 0) || (beatInBar == program.triggerBeat)) && isTriggerBar;
+  bool flashedOnBeat = false;
+
+  switch (program.effect) {
+    case EffectType::BeatPulse:
+      if (isTriggerBeat) {
+        Serial.println("FLASH");
+        renderer.flash100(program.flashDurationMs);
+        flashedOnBeat = true;
       }
       break;
 
-    case EffectType::Strobe:
-      if ((int32_t)(now - nextPulseAtMs) >= 0) {
-        fireFlashPulse();
-        nextPulseAtMs = millis() + program.intervalMs;
+    case EffectType::BarBurst:
+      if (isTriggerBeat) {
+        printBurstLine(program.burstCount);
+        startBurst(program);
+        flashedOnBeat = true;
       }
       break;
 
     case EffectType::Off:
     default:
-      setFlashlightEnabled(false);
+      renderer.allOff();
       break;
+  }
+
+  if (!flashedOnBeat) {
+    Serial.println("-");
+  }
+
+  globalBeat++;
+  beatInBar++;
+
+  if (beatInBar > BEATS_PER_BAR) {
+    beatInBar = 1;
+    currentBar++;
+    Serial.println();
+  }
+}
+
+void serviceClock() {
+  const uint32_t now = millis();
+
+  while ((int32_t)(now - nextBeatAtMs) >= 0) {
+    onBeat();
+    nextBeatAtMs += beatIntervalMs;
   }
 }
 
@@ -199,18 +271,21 @@ void setup() {
   delay(STARTUP_DELAY_MS);
 
   pinMode(BUTTON_PIN, INPUT);
-  hardOff();
+  renderer.begin();
 
   Serial.println();
   Serial.println("Decaflash Node V1");
   Serial.printf(
     "device_type=%u node_kind=%u\n",
-    static_cast<unsigned>(DEVICE_TYPE),
-    static_cast<unsigned>(NODE_KIND)
+    static_cast<unsigned>(NODE_IDENTITY.deviceType),
+    static_cast<unsigned>(NODE_IDENTITY.nodeKind)
   );
+  beatIntervalMs = bpmToIntervalMs(BPM);
   Serial.println("runtime=standalone flashlight demo");
   Serial.println("controls=atom button");
-  Serial.println("future=saved default + esp-now");
+  Serial.println("renderer=flashlight");
+  Serial.printf("clock=%u bpm 4/4\n", BPM);
+  Serial.println("future=saved default + esp-now + rgb renderer");
   printPrograms();
   printHelp();
 
@@ -219,5 +294,6 @@ void setup() {
 
 void loop() {
   serviceButton();
-  serviceProgram();
+  serviceClock();
+  serviceBurst();
 }

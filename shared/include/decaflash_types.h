@@ -16,16 +16,25 @@ enum class NodeKind : uint8_t {
 
 enum class EffectType : uint8_t {
   Off = 0,
-  On = 1,
-  PulseSlow = 2,
-  Strobe = 3,
+  BeatPulse = 1,
+  BarBurst = 2,
 };
 
 struct DefaultPreset {
   const char* name;
   EffectType effect;
   uint8_t intensity;
-  uint16_t intervalMs;
+  uint8_t triggerEveryBars;
+  uint8_t triggerBeat;
+  uint8_t burstCount;
+  uint16_t burstIntervalMs;
+  int16_t burstIntervalStepMs;
+  uint16_t flashDurationMs;
+};
+
+struct NodeIdentity {
+  DeviceType deviceType;
+  NodeKind nodeKind;
 };
 
 }  // namespace decaflash

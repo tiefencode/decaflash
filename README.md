@@ -14,7 +14,7 @@ V1 is intentionally small:
 ## Project Structure
 
 - `apps/brain/src` contains the future controller firmware
-- `apps/node/src` contains the current standalone node firmware
+- `apps/node/src` contains the shared node app plus the current flashlight renderer
 - `shared/include` contains types shared across apps
 - `docs` contains scope notes and project documentation
 
@@ -25,7 +25,7 @@ V1 is intentionally small:
 
 The environment name `node` describes the device type, not a visual role.
 Right now the only implemented node hardware is a flashlight node.
-If RGB nodes are added later, we can either keep one generic `node` firmware or split into hardware-specific environments when needed.
+The node firmware is already structured so hardware-specific renderers can branch underneath the shared node logic.
 
 ## Build
 
@@ -77,21 +77,32 @@ pio device monitor -e node
 
 ## Current Node Demo
 
-The current `node` firmware is a simple standalone flashlight demo with three local programs:
+The current `node` firmware is a simple standalone flashlight demo with five local programs:
 
-- `Flash 3Hz`
-- `Pulse Slow`
-- `Strobe`
+- `Beat Drive`
+- `Heavy Half`
+- `Double Tap 3Hz`
+- `Quad Skip`
+- `Riser 5x`
 
 Controls:
 
 - short button press on the ATOM cycles to the next program
 - long button press turns the flashlight output off
 
+Timing:
+
+- internal local clock at `120 BPM`
+- `Beat Drive` hits every beat with a short, punchy flash
+- `Heavy Half` hits only on beat 1 with a longer, heavier flash
+- `Double Tap 3Hz` fires a 2-hit burst on beat 1 of every bar with `333 ms` spacing
+- `Quad Skip` fires a 4-hit burst on beat 1 every second bar and tightens slightly inside the burst
+- `Riser 5x` fires a 5-hit burst on beat 1 of every bar and accelerates inside the burst
+
 ## V1 Scope
 
 - standalone flashlight node first
-- local test patterns over serial
+- local test patterns on an internal beat clock
 - no radio yet
 - no microphone yet
 - no beat detection from audio yet
