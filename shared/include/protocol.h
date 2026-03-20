@@ -11,6 +11,7 @@ enum class MessageType : uint8_t {
   NodeCommand = 1,
   NodeStatus = 2,
   ClockSync = 3,
+  BrainHello = 4,
 };
 
 struct MessageHeader {
@@ -45,6 +46,11 @@ struct ClockSyncMessage {
   uint8_t beatsPerBar;
   uint8_t beatInBar;
   uint32_t currentBar;
+};
+
+struct BrainHelloMessage {
+  MessageHeader header;
+  uint32_t helloRevision;
 };
 
 constexpr MessageHeader makeHeader(MessageType type) {
@@ -103,6 +109,13 @@ constexpr ClockSyncMessage makeClockSyncMessage(
     beatsPerBar,
     beatInBar,
     currentBar,
+  };
+}
+
+constexpr BrainHelloMessage makeBrainHelloMessage(uint32_t helloRevision) {
+  return BrainHelloMessage{
+    makeHeader(MessageType::BrainHello),
+    helloRevision,
   };
 }
 

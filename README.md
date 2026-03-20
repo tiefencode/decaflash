@@ -100,6 +100,16 @@ pio device monitor -e node --port /dev/cu.usbserial-B956E80C38
 pio device monitor -e brain --port /dev/cu.usbserial-2D52E72138
 ```
 
+## Brain Controls
+
+Current `brain` button behavior on the ATOM Matrix:
+
+- single short tap: switch to the next demo mode
+- two or more fast taps: update BPM from tap tempo
+- every recognized tap tempo input flashes the full matrix orange
+
+Single-tap mode switching is intentionally delayed by a short tap window so the firmware can distinguish it from a tap-tempo sequence.
+
 ## Current Node Demo
 
 The current `node` firmware is a simple standalone flashlight demo with five local programs:

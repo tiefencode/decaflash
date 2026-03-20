@@ -13,6 +13,7 @@ using decaflash::espnow_transport::initEspNow;
 using decaflash::espnow_transport::isValidHeader;
 using decaflash::node::kProgramCount;
 using decaflash::node::kPrograms;
+using decaflash::protocol::BrainHelloMessage;
 using decaflash::protocol::ClockSyncMessage;
 using decaflash::protocol::NodeCommandMessage;
 
@@ -26,6 +27,9 @@ static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
 static constexpr uint32_t STARTUP_DELAY_MS = 500;
 static constexpr uint32_t CLOCK_SYNC_TIMEOUT_MS = 4000;
+static constexpr uint8_t BRAIN_CONNECT_FLASH_COUNT = 3;
+static constexpr uint32_t BRAIN_CONNECT_FLASH_INTERVAL_MS = 1000;
+static constexpr uint16_t BRAIN_CONNECT_FLASH_DURATION_MS = 260;
 static constexpr uint32_t SOFT_SYNC_MATCH_WINDOW_MS = 120;
 static constexpr uint32_t DUPLICATE_BEAT_GUARD_MS = 250;
 static constexpr int32_t SOFT_SYNC_MAX_CORRECTION_MS = 30;
@@ -33,6 +37,17 @@ static constexpr int32_t HARD_SYNC_ERROR_MS = 180;
 static constexpr int FLASH_PIN = 26;
 static constexpr uint16_t BPM = 120;
 static constexpr uint8_t DEFAULT_BEATS_PER_BAR = 4;
+static constexpr NodeCommand REMOTE_IDLE_COMMAND = {
+  "Remote Idle",
+  EffectType::Off,
+  255,
+  1,
+  1,
+  0,
+  0,
+  0,
+  0,
+};
 
 size_t currentProgram = 0;
 NodeCommand activeCommand = kPrograms[0];
@@ -62,9 +77,11 @@ struct BurstState {
 };
 
 BurstState burst;
+bool brainConnected = false;
 bool remoteControlActive = false;
 bool awaitingRemoteClock = false;
 uint32_t lastRemoteCommandRevision = 0;
+uint32_t lastClockRevision = 0;
 uint32_t lastClockBeatSerial = 0;
 uint32_t lastClockSyncAtMs = 0;
 bool clockLocked = false;
@@ -78,8 +95,10 @@ uint32_t lastPrintedBar = 0;
 portMUX_TYPE radioMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool hasPendingCommand = false;
 volatile bool hasPendingClockSync = false;
+volatile bool hasPendingBrainHello = false;
 NodeCommandMessage pendingCommandMessage = {};
 ClockSyncMessage pendingClockSyncMessage = {};
+BrainHelloMessage pendingBrainHelloMessage = {};
 
 void onBeat();
 
@@ -112,6 +131,21 @@ void applyCommand(const NodeCommand& command) {
   renderer.allOff();
 }
 
+void runBrainConnectFlashSequence() {
+  brainConnected = true;
+  burst.active = false;
+  burst.remaining = 0;
+  renderer.allOff();
+
+  for (uint8_t i = 0; i < BRAIN_CONNECT_FLASH_COUNT; ++i) {
+    renderer.flash100(BRAIN_CONNECT_FLASH_DURATION_MS);
+
+    if (i + 1 < BRAIN_CONNECT_FLASH_COUNT) {
+      delay(BRAIN_CONNECT_FLASH_INTERVAL_MS - BRAIN_CONNECT_FLASH_DURATION_MS);
+    }
+  }
+}
+
 void stageIncomingCommand(const NodeCommandMessage& message) {
   portENTER_CRITICAL(&radioMux);
   pendingCommandMessage = message;
@@ -123,6 +157,13 @@ void stageIncomingClockSync(const ClockSyncMessage& message) {
   portENTER_CRITICAL(&radioMux);
   pendingClockSyncMessage = message;
   hasPendingClockSync = true;
+  portEXIT_CRITICAL(&radioMux);
+}
+
+void stageIncomingBrainHello(const BrainHelloMessage& message) {
+  portENTER_CRITICAL(&radioMux);
+  pendingBrainHelloMessage = message;
+  hasPendingBrainHello = true;
   portEXIT_CRITICAL(&radioMux);
 }
 
@@ -155,12 +196,42 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
       return;
     }
     stageIncomingClockSync(message);
+    return;
+  }
+
+  if (header.type == decaflash::protocol::MessageType::BrainHello &&
+      len == static_cast<int>(sizeof(BrainHelloMessage))) {
+    BrainHelloMessage message = {};
+    memcpy(&message, data, sizeof(message));
+    if (!isValidHeader(message.header, decaflash::protocol::MessageType::BrainHello)) {
+      return;
+    }
+    stageIncomingBrainHello(message);
+  }
+}
+
+void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
+  (void)message;
+
+  if (!brainConnected) {
+    runBrainConnectFlashSequence();
+    applyCommand(REMOTE_IDLE_COMMAND);
+    remoteControlActive = true;
+    awaitingRemoteClock = true;
+    Serial.println();
+    Serial.println("-----");
+    Serial.println("REMOTE: waiting for brain");
+    Serial.println("-----");
   }
 }
 
 void processPendingCommandMessage(const NodeCommandMessage& message) {
   if (message.targetNodeKind != NODE_IDENTITY.nodeKind) {
     return;
+  }
+
+  if (!brainConnected) {
+    runBrainConnectFlashSequence();
   }
 
   if (remoteControlActive && message.commandRevision == lastRemoteCommandRevision) {
@@ -181,16 +252,31 @@ void processPendingCommandMessage(const NodeCommandMessage& message) {
 }
 
 void applyClockSync(const ClockSyncMessage& message) {
-  if (message.beatSerial == lastClockBeatSerial) {
+  if (message.clockRevision == lastClockRevision &&
+      message.beatSerial == lastClockBeatSerial) {
     return;
   }
 
+  if (!brainConnected) {
+    runBrainConnectFlashSequence();
+  }
+
   const uint32_t now = millis();
+  lastClockRevision = message.clockRevision;
   lastClockBeatSerial = message.beatSerial;
   lastClockSyncAtMs = now;
   beatIntervalMs = bpmToIntervalMs(message.bpm);
   beatsPerBar = message.beatsPerBar;
   awaitingRemoteClock = false;
+
+  if (!remoteControlActive) {
+    advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
+    nextBeatAtMs = now + beatIntervalMs;
+    clockLocked = true;
+    clockHoldoverAnnounced = false;
+    return;
+  }
+
   if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
     advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
     nextBeatAtMs = lastBeatRenderedAtMs + beatIntervalMs;
@@ -236,8 +322,10 @@ void applyClockSync(const ClockSyncMessage& message) {
 void processPendingRadio() {
   bool hadCommand = false;
   bool hadClockSync = false;
+  bool hadBrainHello = false;
   NodeCommandMessage commandMessage = {};
   ClockSyncMessage clockMessage = {};
+  BrainHelloMessage brainHelloMessage = {};
 
   portENTER_CRITICAL(&radioMux);
   if (hasPendingCommand) {
@@ -250,7 +338,16 @@ void processPendingRadio() {
     hasPendingClockSync = false;
     hadClockSync = true;
   }
+  if (hasPendingBrainHello) {
+    brainHelloMessage = pendingBrainHelloMessage;
+    hasPendingBrainHello = false;
+    hadBrainHello = true;
+  }
   portEXIT_CRITICAL(&radioMux);
+
+  if (hadBrainHello) {
+    processPendingBrainHelloMessage(brainHelloMessage);
+  }
 
   if (hadCommand) {
     processPendingCommandMessage(commandMessage);
@@ -290,6 +387,7 @@ void printHelp() {
 void selectProgram(size_t programIndex) {
   currentProgram = programIndex % kProgramCount;
   applyCommand(kPrograms[currentProgram]);
+  brainConnected = false;
   remoteControlActive = false;
   awaitingRemoteClock = false;
   printCurrentProgram();
@@ -310,6 +408,10 @@ void outputOffFromButton() {
 }
 
 void serviceButton() {
+  if (brainConnected || remoteControlActive) {
+    return;
+  }
+
   const uint32_t now = millis();
   const bool level = digitalRead(BUTTON_PIN);
 
@@ -481,6 +583,14 @@ void serviceClock() {
       (now - lastClockSyncAtMs) >= CLOCK_SYNC_TIMEOUT_MS) {
     clockLocked = false;
     clockHoldoverAnnounced = true;
+    if (brainConnected) {
+      brainConnected = false;
+      awaitingRemoteClock = false;
+    }
+  }
+
+  if (brainConnected && !remoteControlActive) {
+    return;
   }
 
   if (remoteControlActive && awaitingRemoteClock) {
