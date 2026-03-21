@@ -236,10 +236,6 @@ void updateBpmFromTapTempo() {
 
   currentBpm = clampBpm(static_cast<uint16_t>(60000UL / averageIntervalMs));
   beatIntervalMs = bpmToIntervalMs(currentBpm);
-  nextBeatAtMs = millis() + beatIntervalMs;
-  beatInBar = 1;
-  currentBar = 1;
-  beatSerial = 0;
   clockRevision++;
 
   Serial.printf("tap_tempo=bpm:%u\n", static_cast<unsigned>(currentBpm));
