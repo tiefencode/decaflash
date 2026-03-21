@@ -138,9 +138,8 @@ void onBeat() {
   if (millis() >= uiFeedbackUntilMs && millis() >= tapTempoUiUntilMs) {
     drawBeatFrame(currentBeat);
   }
-  Serial.printf("beat=%u/%u\n", currentBeat, BEATS_PER_BAR);
 
-  if (espNowReady) {
+  if (espNowReady && currentBeat == 1) {
     const auto sync = makeClockSyncMessage(
       clockRevision,
       ++beatSerial,
