@@ -7,6 +7,7 @@ Monorepo for the Decaflash cube system.
 V1 is intentionally small:
 
 - `brain` can already broadcast demo commands and a separate beat clock over ESP-NOW
+- `brain` can now read the Unit Mini PDM on raw-signal level and print live stats over serial
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
 - microphone and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
@@ -109,6 +110,37 @@ Current `brain` button behavior on the ATOM Matrix:
 - every recognized tap tempo input flashes the full matrix orange
 
 Single-tap mode switching is intentionally delayed by a short tap window so the firmware can distinguish it from a tap-tempo sequence.
+
+## Brain Microphone Input
+
+The current `brain` firmware also initializes a Unit Mini PDM on the ATOM Matrix Grove port and prints raw input statistics to serial.
+
+Current wiring for this setup:
+
+- Unit Mini PDM `DATA` -> ATOM Matrix `G26` (yellow Grove wire)
+- Unit Mini PDM `CLK` -> ATOM Matrix `G32` (white Grove wire)
+- `5V` and `GND` as usual on the Grove port
+
+Current capture settings:
+
+- `16 kHz`
+- `16-bit`
+- mono PDM RX on `I2S_NUM_0`
+
+Expected serial output after boot:
+
+```text
+mic=ready data_pin=26 clock_pin=32 sample_rate=16000 dma=8x128
+mic=report fields=env avg peak dc raw_p2p samples
+mic=level env=412 avg=537 peak=1732 dc=-228 raw_p2p=2890 samples=4096
+mic=frame_centered 4 -3 7 12 -8 -6 3 9
+```
+
+Current preprocessing is intentionally still small:
+
+- slow DC estimate for offset removal
+- smoothed envelope level for quick live monitoring
+- no onset logic or beat detection yet
 
 ## Current Node Demo
 
@@ -214,7 +246,7 @@ auto sync = makeClockSyncMessage(
 The first transport step is now wired in and split cleanly:
 
 - `brain` sends `NodeCommandMessage` on mode changes and occasional refresh
-- `brain` sends `ClockSyncMessage` on every beat
+- `brain` sends `ClockSyncMessage` once per bar
 - `node` applies commands only when the revision changes
 - `node` keeps its local clock running, but regularly re-locks to the brain clock
 - small phase errors are trimmed softly on the next beat instead of always hard-resetting
@@ -233,7 +265,7 @@ This is still intentionally simple:
 - standalone flashlight node first
 - local test patterns on an internal beat clock
 - initial ESP-NOW master/slave transport
-- no microphone yet
+- raw microphone input on the brain only
 - no beat detection from audio yet
 
 ## Next Steps

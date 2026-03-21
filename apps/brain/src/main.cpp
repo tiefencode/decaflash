@@ -4,6 +4,7 @@
 #include "command_examples.h"
 #include "decaflash_types.h"
 #include "espnow_transport.h"
+#include "pdm_microphone.h"
 #include "protocol.h"
 
 using decaflash::DeviceType;
@@ -47,6 +48,7 @@ uint32_t pendingSingleTapAtMs = 0;
 uint32_t lastTapAtMs = 0;
 uint32_t tapIntervalsMs[3] = {0, 0, 0};
 uint8_t tapIntervalCount = 0;
+decaflash::brain::PdmMicrophone microphone;
 
 static constexpr uint8_t kDigitMasks[5][5] = {
   {0b00100, 0b01100, 0b00100, 0b00100, 0b01110},  // 1
@@ -155,17 +157,18 @@ void onBeat() {
       sizeof(sync)
     );
 
-    Serial.printf("send=clock_sync result=%d beat=%u bar=%lu\n",
-                  result,
-                  currentBeat,
-                  static_cast<unsigned long>(currentBar));
+    if (result != ESP_OK) {
+      Serial.printf("send=clock_sync result=%d beat=%u bar=%lu\n",
+                    result,
+                    currentBeat,
+                    static_cast<unsigned long>(currentBar));
+    }
   }
 
   beatInBar++;
   if (beatInBar > BEATS_PER_BAR) {
     beatInBar = 1;
     currentBar++;
-    Serial.println();
   }
 }
 
@@ -301,6 +304,7 @@ void setup() {
   const auto message = makeNodeCommandMessage(decaflash::NodeKind::Flashlight, kFlashQuadSkip, 1);
   Serial.printf("protocol=dcfl/v%u\n", message.header.version);
   Serial.printf("example_command=%s\n", message.command.name);
+  microphone.begin();
 
   const auto initResult = initEspNow();
   const auto peerResult = initResult.ok() ? ensureBroadcastPeer() : decltype(ensureBroadcastPeer()){};
@@ -328,6 +332,7 @@ void setup() {
 void loop() {
   M5.update();
   const uint32_t now = millis();
+  microphone.update();
 
   if (M5.Btn.wasPressed()) {
     registerTap();
