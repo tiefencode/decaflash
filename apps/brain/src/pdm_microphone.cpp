@@ -28,6 +28,22 @@ static constexpr uint8_t kMeterBasePixels = 20;
 static constexpr uint8_t kMeterBeatPixels = 5;
 static constexpr uint8_t kMeterQuietCyclesForZero = 4;
 static constexpr uint8_t kMeterReleaseStep = 2;
+static constexpr uint32_t kAnalysisMusicOnMargin = 22;
+static constexpr uint32_t kAnalysisMusicOffMargin = 12;
+static constexpr uint32_t kAnalysisOnsetMinimum = 18;
+static constexpr uint32_t kAnalysisOnsetDivisor = 3;
+static constexpr uint32_t kAnalysisPeakRatioLimit = 18;
+static constexpr uint8_t kAnalysisLockedConfidence = 50;
+static constexpr uint8_t kAnalysisEarlyIntervalPercent = 80;
+static constexpr uint8_t kAnalysisDoubleIntervalMinPercent = 170;
+static constexpr uint8_t kAnalysisDoubleIntervalMaxPercent = 230;
+static constexpr uint32_t kAnalysisOnsetCooldownMs = 300;
+static constexpr uint32_t kAnalysisMinIntervalMs = 300;
+static constexpr uint32_t kAnalysisMaxIntervalMs = 1200;
+static constexpr uint32_t kAnalysisTempoHoldMs = 2200;
+static constexpr uint16_t kAnalysisMinTempoBpm = 80;
+static constexpr uint16_t kAnalysisMaxTempoBpm = 180;
+static constexpr uint8_t kAnalysisHistorySize = 6;
 
 }  // namespace
 
@@ -82,7 +98,7 @@ bool PdmMicrophone::begin() {
                 static_cast<unsigned long>(kSampleRateHz),
                 8u,
                 128u);
-  Serial.println("mic=report fields=env block fast slow disp avg peak dc raw_p2p floor ceil meter samples");
+  Serial.println("mic=report fields=env block mfast mslow disp avg peak dc raw_p2p floor ceil meter afast aslow afloor music onset bpm conf samples");
   return true;
 }
 
@@ -95,6 +111,7 @@ void PdmMicrophone::update() {
   bool readAnySamples = false;
   updateAbsSum_ = 0;
   updateSampleCount_ = 0;
+  updatePeakAbs_ = 0;
 
   for (uint8_t attempt = 0; attempt < 4; ++attempt) {
     size_t bytesRead = 0;
@@ -129,6 +146,7 @@ void PdmMicrophone::update() {
 
   const uint32_t now = millis();
   if (readAnySamples) {
+    updateAnalysis(now, blockLevel_, updatePeakAbs_);
     updateMeterLevel(blockLevel_);
   }
   if (readAnySamples && (now - lastReportAtMs_) >= kReportIntervalMs) {
@@ -142,6 +160,22 @@ bool PdmMicrophone::ready() const {
 
 uint8_t PdmMicrophone::meterLevel() const {
   return meterLevel_;
+}
+
+bool PdmMicrophone::musicPresent() const {
+  return musicPresent_;
+}
+
+uint16_t PdmMicrophone::detectedBpm() const {
+  return detectedBpm_;
+}
+
+uint8_t PdmMicrophone::beatConfidence() const {
+  return beatConfidence_;
+}
+
+uint32_t PdmMicrophone::lastOnsetAtMs() const {
+  return lastOnsetAtMs_;
 }
 
 void PdmMicrophone::resetWindowStats() {
@@ -179,6 +213,9 @@ void PdmMicrophone::accumulateSamples(const int16_t* samples, size_t sampleCount
     if (absCenteredSample > centeredPeakAbs_) {
       centeredPeakAbs_ = absCenteredSample;
     }
+    if (absCenteredSample > updatePeakAbs_) {
+      updatePeakAbs_ = absCenteredSample;
+    }
 
     centeredAbsSum_ += absCenteredSample;
     updateAbsSum_ += absCenteredSample;
@@ -198,7 +235,7 @@ void PdmMicrophone::printReport(uint32_t now) {
   const int32_t rawPeakToPeak =
     static_cast<int32_t>(rawMaxSample_) - static_cast<int32_t>(rawMinSample_);
 
-  Serial.printf("mic=level env=%lu block=%lu fast=%lu slow=%lu disp=%lu avg=%lu peak=%u dc=%ld raw_p2p=%ld floor=%lu ceil=%lu meter=%u samples=%lu\n",
+  Serial.printf("mic=level env=%lu block=%lu mfast=%lu mslow=%lu disp=%lu avg=%lu peak=%u dc=%ld raw_p2p=%ld floor=%lu ceil=%lu meter=%u afast=%lu aslow=%lu afloor=%lu music=%u onset=%lu bpm=%u conf=%u samples=%lu\n",
                 static_cast<unsigned long>(envelopeLevel_),
                 static_cast<unsigned long>(blockLevel_),
                 static_cast<unsigned long>(meterFastLevel_),
@@ -211,6 +248,13 @@ void PdmMicrophone::printReport(uint32_t now) {
                 static_cast<unsigned long>(noiseFloor_),
                 static_cast<unsigned long>(signalCeiling_),
                 static_cast<unsigned>(meterLevel_),
+                static_cast<unsigned long>(analysisFastLevel_),
+                static_cast<unsigned long>(analysisSlowLevel_),
+                static_cast<unsigned long>(analysisFloor_),
+                static_cast<unsigned>(musicPresent_),
+                static_cast<unsigned long>(onsetStrength_),
+                static_cast<unsigned>(detectedBpm_),
+                static_cast<unsigned>(beatConfidence_),
                 static_cast<unsigned long>(sampleCount_));
 
   if (lastFrameCount_ > 0 && (now - lastFramePrintAtMs_) >= kFramePrintIntervalMs) {
@@ -224,6 +268,172 @@ void PdmMicrophone::printReport(uint32_t now) {
 
   resetWindowStats();
   lastReportAtMs_ = now;
+}
+
+void PdmMicrophone::updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t peakLevel) {
+  if (analysisFastLevel_ == 0) {
+    analysisFastLevel_ = blockLevel;
+  } else if (blockLevel > analysisFastLevel_) {
+    analysisFastLevel_ = ((analysisFastLevel_ * 2UL) + blockLevel) / 3UL;
+  } else {
+    analysisFastLevel_ = ((analysisFastLevel_ * 5UL) + blockLevel) / 6UL;
+  }
+
+  if (analysisSlowLevel_ == 0) {
+    analysisSlowLevel_ = blockLevel;
+  } else if (blockLevel > analysisSlowLevel_) {
+    analysisSlowLevel_ = ((analysisSlowLevel_ * 15UL) + blockLevel) / 16UL;
+  } else {
+    analysisSlowLevel_ = ((analysisSlowLevel_ * 31UL) + blockLevel) / 32UL;
+  }
+
+  if (analysisFloor_ == 0) {
+    analysisFloor_ = analysisSlowLevel_;
+  } else if (analysisSlowLevel_ < analysisFloor_) {
+    analysisFloor_ = ((analysisFloor_ * 7UL) + analysisSlowLevel_) / 8UL;
+  } else {
+    analysisFloor_ = ((analysisFloor_ * 255UL) + analysisSlowLevel_) / 256UL;
+  }
+
+  const uint32_t musicOnThreshold = analysisFloor_ + kAnalysisMusicOnMargin;
+  const uint32_t musicOffThreshold = analysisFloor_ + kAnalysisMusicOffMargin;
+  if (musicPresent_) {
+    musicPresent_ = analysisSlowLevel_ > musicOffThreshold;
+  } else {
+    musicPresent_ = analysisSlowLevel_ > musicOnThreshold;
+  }
+
+  const uint32_t transientLevel =
+    (analysisFastLevel_ > analysisSlowLevel_) ? (analysisFastLevel_ - analysisSlowLevel_) : 0;
+  onsetStrength_ = transientLevel;
+
+  if ((now - lastOnsetAtMs_) > kAnalysisTempoHoldMs) {
+    if (!musicPresent_) {
+      detectedBpm_ = 0;
+      onsetIntervalCount_ = 0;
+    }
+    beatConfidence_ = 0;
+  }
+
+  if (!musicPresent_) {
+    return;
+  }
+
+  const uint32_t energySpan =
+    (analysisSlowLevel_ > analysisFloor_) ? (analysisSlowLevel_ - analysisFloor_) : 0;
+  const uint32_t onsetThreshold = kAnalysisOnsetMinimum + (energySpan / kAnalysisOnsetDivisor);
+  const bool cooldownElapsed =
+    (lastOnsetAtMs_ == 0) || ((now - lastOnsetAtMs_) >= kAnalysisOnsetCooldownMs);
+  const bool peakLooksMusical =
+    (blockLevel == 0) || (peakLevel <= (blockLevel * kAnalysisPeakRatioLimit));
+
+  if (!cooldownElapsed || !peakLooksMusical || transientLevel <= onsetThreshold) {
+    return;
+  }
+
+  uint32_t intervalMs = (lastOnsetAtMs_ == 0) ? 0 : (now - lastOnsetAtMs_);
+  if (intervalMs != 0 && intervalMs < kAnalysisMinIntervalMs) {
+    return;
+  }
+
+  if (intervalMs != 0 && detectedBpm_ != 0 && beatConfidence_ >= kAnalysisLockedConfidence) {
+    const uint32_t expectedIntervalMs = 60000UL / detectedBpm_;
+    const uint32_t earlyIntervalMs =
+      (expectedIntervalMs * kAnalysisEarlyIntervalPercent) / 100UL;
+    if (intervalMs < earlyIntervalMs) {
+      return;
+    }
+
+    const uint32_t doubleIntervalMinMs =
+      (expectedIntervalMs * kAnalysisDoubleIntervalMinPercent) / 100UL;
+    const uint32_t doubleIntervalMaxMs =
+      (expectedIntervalMs * kAnalysisDoubleIntervalMaxPercent) / 100UL;
+    if (intervalMs >= doubleIntervalMinMs && intervalMs <= doubleIntervalMaxMs) {
+      intervalMs /= 2UL;
+    }
+  }
+
+  lastOnsetAtMs_ = now;
+  registerOnset(now, transientLevel, intervalMs);
+}
+
+void PdmMicrophone::registerOnset(uint32_t now, uint32_t onsetStrength, uint32_t intervalMs) {
+  if (intervalMs >= kAnalysisMinIntervalMs && intervalMs <= kAnalysisMaxIntervalMs) {
+    if (onsetIntervalCount_ < kAnalysisHistorySize) {
+      onsetIntervalsMs_[onsetIntervalCount_++] = intervalMs;
+    } else {
+      for (uint8_t i = 1; i < kAnalysisHistorySize; ++i) {
+        onsetIntervalsMs_[i - 1] = onsetIntervalsMs_[i];
+      }
+      onsetIntervalsMs_[kAnalysisHistorySize - 1] = intervalMs;
+    }
+    updateTempoEstimate();
+  } else if (intervalMs > kAnalysisMaxIntervalMs) {
+    onsetIntervalCount_ = 0;
+    beatConfidence_ = 0;
+  }
+
+  Serial.printf("mic=beat onset=%lu interval=%lu bpm=%u conf=%u block=%lu aslow=%lu peak=%u music=%u at=%lu\n",
+                static_cast<unsigned long>(onsetStrength),
+                static_cast<unsigned long>(intervalMs),
+                static_cast<unsigned>(detectedBpm_),
+                static_cast<unsigned>(beatConfidence_),
+                static_cast<unsigned long>(blockLevel_),
+                static_cast<unsigned long>(analysisSlowLevel_),
+                static_cast<unsigned>(updatePeakAbs_),
+                static_cast<unsigned>(musicPresent_),
+                static_cast<unsigned long>(now));
+}
+
+void PdmMicrophone::updateTempoEstimate() {
+  if (onsetIntervalCount_ == 0) {
+    return;
+  }
+
+  uint32_t intervalSum = 0;
+  for (uint8_t i = 0; i < onsetIntervalCount_; ++i) {
+    intervalSum += onsetIntervalsMs_[i];
+  }
+
+  const uint32_t averageIntervalMs = intervalSum / onsetIntervalCount_;
+  if (averageIntervalMs == 0) {
+    return;
+  }
+
+  uint16_t bpm = static_cast<uint16_t>((60000UL + (averageIntervalMs / 2UL)) / averageIntervalMs);
+  while (bpm < kAnalysisMinTempoBpm) {
+    bpm = static_cast<uint16_t>(bpm * 2U);
+  }
+  while (bpm > kAnalysisMaxTempoBpm) {
+    bpm = static_cast<uint16_t>(bpm / 2U);
+  }
+
+  if (detectedBpm_ == 0) {
+    detectedBpm_ = bpm;
+  } else {
+    detectedBpm_ = static_cast<uint16_t>(((detectedBpm_ * 3UL) + bpm + 2UL) / 4UL);
+  }
+
+  uint32_t deviationSum = 0;
+  for (uint8_t i = 0; i < onsetIntervalCount_; ++i) {
+    deviationSum += static_cast<uint32_t>(abs(
+      static_cast<int32_t>(onsetIntervalsMs_[i]) - static_cast<int32_t>(averageIntervalMs)
+    ));
+  }
+
+  const uint32_t averageDeviationMs = deviationSum / onsetIntervalCount_;
+  uint32_t stabilityScore = 100;
+  if (averageIntervalMs > 0) {
+    const uint32_t stabilityPenalty = (averageDeviationMs * 240UL) / averageIntervalMs;
+    stabilityScore = (stabilityPenalty >= 100UL) ? 0UL : (100UL - stabilityPenalty);
+  }
+
+  uint32_t historyScore = onsetIntervalCount_ * 20UL;
+  if (historyScore > 100UL) {
+    historyScore = 100UL;
+  }
+
+  beatConfidence_ = static_cast<uint8_t>((stabilityScore * historyScore) / 100UL);
 }
 
 void PdmMicrophone::updateMeterLevel(uint32_t blockLevel) {

@@ -21,13 +21,22 @@ static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
 static constexpr uint32_t COMMAND_REFRESH_MS = 10000;
 static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
-static constexpr uint16_t MATRIX_FLASH_MS = 50;
+static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
+static constexpr uint16_t TAP_FLASH_MS = 50;
 static constexpr uint32_t METER_REFRESH_MS = 40;
 static constexpr uint32_t UI_MODE_DISPLAY_MS = 3000;
 static constexpr uint32_t BUTTON_TAP_WINDOW_MS = 450;
 static constexpr uint32_t TAP_TEMPO_TIMEOUT_MS = 1600;
 static constexpr uint16_t TAP_TEMPO_MIN_BPM = 60;
 static constexpr uint16_t TAP_TEMPO_MAX_BPM = 180;
+static constexpr uint8_t AUDIO_SYNC_CANDIDATE_CONFIDENCE = 85;
+static constexpr uint8_t AUDIO_SYNC_LOCKED_CONFIDENCE = 70;
+static constexpr uint8_t AUDIO_SYNC_REQUIRED_ONSETS = 3;
+static constexpr uint8_t AUDIO_SYNC_CANDIDATE_BPM_TOLERANCE = 2;
+static constexpr uint8_t AUDIO_SYNC_MAX_BPM_STEP = 1;
+static constexpr uint32_t AUDIO_SYNC_LOST_MS = 4000;
+static constexpr uint32_t AUDIO_SYNC_HARD_RESYNC_MS = 90;
+static constexpr uint8_t AUDIO_SYNC_SOFT_TRIM_DIVISOR = 2;
 uint32_t nextSendAtMs = 0;
 bool espNowReady = false;
 bool brainLive = false;
@@ -43,6 +52,8 @@ uint32_t currentBar = 1;
 uint32_t matrixOffAtMs = 0;
 uint32_t uiFeedbackUntilMs = 0;
 uint32_t tapTempoUiUntilMs = 0;
+uint32_t beatDotUntilMs = 0;
+uint8_t beatDotBeat = 0;
 size_t currentModeIndex = 0;
 bool pendingSingleTap = false;
 uint32_t pendingSingleTapAtMs = 0;
@@ -50,6 +61,11 @@ uint32_t lastTapAtMs = 0;
 uint32_t tapIntervalsMs[3] = {0, 0, 0};
 uint8_t tapIntervalCount = 0;
 uint32_t lastMeterDrawAtMs = 0;
+bool audioClockLocked = false;
+uint8_t audioSyncCandidateCount = 0;
+uint16_t audioSyncCandidateBpm = 0;
+uint32_t lastAudioOnsetHandledAtMs = 0;
+uint32_t lastAudioLockAtMs = 0;
 decaflash::brain::PdmMicrophone microphone;
 
 static constexpr uint8_t kDigitMasks[5][5] = {
@@ -82,6 +98,134 @@ uint16_t clampBpm(uint16_t bpm) {
   return bpm;
 }
 
+uint16_t bpmDifference(uint16_t left, uint16_t right) {
+  return (left > right) ? (left - right) : (right - left);
+}
+
+void resetAudioClockFollow() {
+  audioClockLocked = false;
+  audioSyncCandidateCount = 0;
+  audioSyncCandidateBpm = 0;
+  lastAudioOnsetHandledAtMs = 0;
+  lastAudioLockAtMs = 0;
+}
+
+void setClockBpm(uint16_t bpm, const char* source) {
+  const uint16_t clampedBpm = clampBpm(bpm);
+  if (clampedBpm == currentBpm) {
+    beatIntervalMs = bpmToIntervalMs(currentBpm);
+    return;
+  }
+
+  currentBpm = clampedBpm;
+  beatIntervalMs = bpmToIntervalMs(currentBpm);
+  clockRevision++;
+  Serial.printf("clock=bpm source=%s bpm=%u\n", source, static_cast<unsigned>(currentBpm));
+}
+
+void updateClockFromAudio(uint32_t now) {
+  if (!brainLive) {
+    resetAudioClockFollow();
+    return;
+  }
+
+  const bool musicPresent = microphone.musicPresent();
+  const uint16_t detectedBpm = microphone.detectedBpm();
+  const uint8_t beatConfidence = microphone.beatConfidence();
+  const uint32_t onsetAtMs = microphone.lastOnsetAtMs();
+
+  if (audioClockLocked && (!musicPresent || detectedBpm == 0) &&
+      (now - lastAudioLockAtMs) > AUDIO_SYNC_LOST_MS) {
+    resetAudioClockFollow();
+    Serial.println("audio_sync=unlock reason=signal_lost");
+    return;
+  }
+
+  if (!musicPresent || detectedBpm == 0 || onsetAtMs == 0 || onsetAtMs == lastAudioOnsetHandledAtMs) {
+    return;
+  }
+
+  const uint16_t targetBpm = clampBpm(detectedBpm);
+  const uint8_t requiredConfidence =
+    audioClockLocked ? AUDIO_SYNC_LOCKED_CONFIDENCE : AUDIO_SYNC_CANDIDATE_CONFIDENCE;
+  if (beatConfidence < requiredConfidence) {
+    if (!audioClockLocked) {
+      audioSyncCandidateCount = 0;
+      audioSyncCandidateBpm = 0;
+    }
+    return;
+  }
+
+  lastAudioOnsetHandledAtMs = onsetAtMs;
+
+  if (!audioClockLocked) {
+    if (audioSyncCandidateCount == 0 ||
+        bpmDifference(audioSyncCandidateBpm, targetBpm) > AUDIO_SYNC_CANDIDATE_BPM_TOLERANCE) {
+      audioSyncCandidateBpm = targetBpm;
+      audioSyncCandidateCount = 1;
+      return;
+    }
+
+    audioSyncCandidateBpm =
+      static_cast<uint16_t>((audioSyncCandidateBpm + targetBpm + 1U) / 2U);
+    if (audioSyncCandidateCount < AUDIO_SYNC_REQUIRED_ONSETS) {
+      audioSyncCandidateCount++;
+    }
+
+    if (audioSyncCandidateCount < AUDIO_SYNC_REQUIRED_ONSETS) {
+      return;
+    }
+
+    audioClockLocked = true;
+    lastAudioLockAtMs = now;
+    setClockBpm(audioSyncCandidateBpm, "audio_lock");
+    nextBeatAtMs = onsetAtMs;
+    Serial.printf("audio_sync=lock bpm=%u conf=%u at=%lu\n",
+                  static_cast<unsigned>(currentBpm),
+                  static_cast<unsigned>(beatConfidence),
+                  static_cast<unsigned long>(onsetAtMs));
+    return;
+  }
+
+  lastAudioLockAtMs = now;
+
+  if (targetBpm != currentBpm) {
+    const int32_t bpmDelta = static_cast<int32_t>(targetBpm) - static_cast<int32_t>(currentBpm);
+    uint16_t steppedBpm = currentBpm;
+    if (bpmDelta > 0) {
+      const uint16_t step =
+        static_cast<uint16_t>((bpmDelta > AUDIO_SYNC_MAX_BPM_STEP) ? AUDIO_SYNC_MAX_BPM_STEP : bpmDelta);
+      steppedBpm = static_cast<uint16_t>(currentBpm + step);
+    } else {
+      const int32_t positiveDelta = -bpmDelta;
+      const uint16_t step = static_cast<uint16_t>(
+        (positiveDelta > AUDIO_SYNC_MAX_BPM_STEP) ? AUDIO_SYNC_MAX_BPM_STEP : positiveDelta);
+      steppedBpm = static_cast<uint16_t>(currentBpm - step);
+    }
+
+    setClockBpm(steppedBpm, "audio_follow");
+  }
+
+  const int32_t phaseErrorMs =
+    static_cast<int32_t>(onsetAtMs) - static_cast<int32_t>(nextBeatAtMs);
+  const uint32_t absolutePhaseErrorMs = static_cast<uint32_t>(abs(phaseErrorMs));
+  uint32_t hardResyncMs = beatIntervalMs / 5UL;
+  if (hardResyncMs > AUDIO_SYNC_HARD_RESYNC_MS) {
+    hardResyncMs = AUDIO_SYNC_HARD_RESYNC_MS;
+  }
+  if (hardResyncMs < 20UL) {
+    hardResyncMs = 20UL;
+  }
+
+  if (absolutePhaseErrorMs >= hardResyncMs) {
+    nextBeatAtMs = onsetAtMs;
+    return;
+  }
+
+  nextBeatAtMs = static_cast<uint32_t>(
+    static_cast<int32_t>(nextBeatAtMs) + (phaseErrorMs / AUDIO_SYNC_SOFT_TRIM_DIVISOR));
+}
+
 void resetTapTempoSequence() {
   pendingSingleTap = false;
   pendingSingleTapAtMs = 0;
@@ -112,16 +256,19 @@ void drawModeNumber(size_t modeIndex) {
   }
 }
 
-void drawBeatFrame(uint8_t beat) {
-  const uint32_t fillColor = (beat == 1)
-    ? color(180, 180, 180)
-    : color(0, 70, 160);
+void drawBeatDotOverlay(uint8_t beat) {
+  const uint32_t dotColor = (beat == 1)
+    ? color(255, 0, 0)
+    : color(255, 255, 255);
+  M5.dis.drawpix(4, dotColor);
+}
 
-  for (uint8_t i = 0; i < 25; ++i) {
-    M5.dis.drawpix(i, fillColor);
+void updateBeatDotOverlay(uint32_t now) {
+  if (!brainLive || beatDotUntilMs == 0 || (int32_t)(now - beatDotUntilMs) >= 0) {
+    return;
   }
 
-  matrixOffAtMs = millis() + MATRIX_FLASH_MS;
+  drawBeatDotOverlay(beatDotBeat);
 }
 
 void drawTapTempoFlash() {
@@ -129,7 +276,7 @@ void drawTapTempoFlash() {
     M5.dis.drawpix(i, color(255, 90, 0));
   }
 
-  matrixOffAtMs = millis() + MATRIX_FLASH_MS;
+  matrixOffAtMs = millis() + TAP_FLASH_MS;
 }
 
 uint32_t meterColorForRow(uint8_t rowFromBottom) {
@@ -177,13 +324,8 @@ void updateIdleMatrixUi(uint32_t now) {
 void onBeat() {
   const uint8_t currentBeat = beatInBar;
 
-  if (!brainLive) {
-    return;
-  }
-
-  if (millis() >= uiFeedbackUntilMs && millis() >= tapTempoUiUntilMs) {
-    drawBeatFrame(currentBeat);
-  }
+  beatDotBeat = currentBeat;
+  beatDotUntilMs = millis() + BEAT_DOT_FLASH_MS;
 
   if (espNowReady && currentBeat == 1) {
     const auto sync = makeClockSyncMessage(
@@ -280,9 +422,8 @@ void updateBpmFromTapTempo() {
     return;
   }
 
-  currentBpm = clampBpm(static_cast<uint16_t>(60000UL / averageIntervalMs));
-  beatIntervalMs = bpmToIntervalMs(currentBpm);
-  clockRevision++;
+  resetAudioClockFollow();
+  setClockBpm(static_cast<uint16_t>(60000UL / averageIntervalMs), "tap");
 
   Serial.printf("tap_tempo=bpm:%u\n", static_cast<unsigned>(currentBpm));
 }
@@ -296,6 +437,7 @@ void selectNextMode() {
 
 void activateBrain() {
   brainLive = true;
+  resetAudioClockFollow();
   beatSerial = 0;
   beatInBar = 1;
   currentBar = 1;
@@ -406,6 +548,12 @@ void loop() {
     matrixOffAtMs = 0;
   }
 
+  if (beatDotUntilMs != 0 && (int32_t)(now - beatDotUntilMs) >= 0) {
+    beatDotUntilMs = 0;
+  }
+
+  updateClockFromAudio(now);
+
   while (brainLive && (int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();
     nextBeatAtMs += beatIntervalMs;
@@ -417,4 +565,5 @@ void loop() {
   }
 
   updateIdleMatrixUi(now);
+  updateBeatDotOverlay(now);
 }

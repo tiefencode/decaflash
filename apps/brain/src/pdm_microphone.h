@@ -10,12 +10,19 @@ class PdmMicrophone {
   void update();
   bool ready() const;
   uint8_t meterLevel() const;
+  bool musicPresent() const;
+  uint16_t detectedBpm() const;
+  uint8_t beatConfidence() const;
+  uint32_t lastOnsetAtMs() const;
 
  private:
   void resetWindowStats();
   void accumulateSamples(const int16_t* samples, size_t sampleCount);
   void printReport(uint32_t now);
+  void updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t peakLevel);
   void updateMeterLevel(uint32_t blockLevel);
+  void registerOnset(uint32_t now, uint32_t onsetStrength, uint32_t intervalMs);
+  void updateTempoEstimate();
 
   bool ready_ = false;
   bool reportedReadError_ = false;
@@ -38,8 +45,19 @@ class PdmMicrophone {
   uint32_t updateAbsSum_ = 0;
   uint32_t updateSampleCount_ = 0;
   uint16_t centeredPeakAbs_ = 0;
+  uint16_t updatePeakAbs_ = 0;
   uint8_t lastFrameCount_ = 0;
   int16_t lastFrame_[8] = {0};
+  uint32_t analysisFastLevel_ = 0;
+  uint32_t analysisSlowLevel_ = 0;
+  uint32_t analysisFloor_ = 0;
+  uint32_t onsetStrength_ = 0;
+  uint32_t lastOnsetAtMs_ = 0;
+  uint16_t detectedBpm_ = 0;
+  uint8_t beatConfidence_ = 0;
+  bool musicPresent_ = false;
+  uint8_t onsetIntervalCount_ = 0;
+  uint32_t onsetIntervalsMs_[6] = {0};
 };
 
 }  // namespace decaflash::brain

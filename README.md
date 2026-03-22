@@ -139,9 +139,11 @@ mic=frame_centered 4 -3 7 12 -8 -6 3 9
 Current preprocessing is intentionally still small:
 
 - slow DC estimate for offset removal
-- smoothed envelope level for quick live monitoring
-- 5x5 matrix VU meter when no tap/mode/beat UI is active
-- no onset logic or beat detection yet
+- block-based loudness and transient tracking for live analysis
+- 5x5 matrix VU meter when no tap/mode UI is active
+- prototype onset detection and BPM estimate on serial debug
+- beat indicator dot over the UI: white on every beat, red on beat 1
+- audio analysis can softly steer the live master beat clock after a stable lock
 
 ## Current Node Demo
 
@@ -266,12 +268,12 @@ This is still intentionally simple:
 - standalone flashlight node first
 - local test patterns on an internal beat clock
 - initial ESP-NOW master/slave transport
-- raw microphone input on the brain only
-- no beat detection from audio yet
+- raw microphone input plus prototype onset/BPM analysis on the brain
+- audio BPM can softly guide the live beat clock when confidence stays high
 
 ## Next Steps
 
 1. Test the new clock lock between brain matrix and flashlight node on hardware.
 2. Refine the soft-sync strategy with measured latency and tighter phase heuristics.
 3. Add persistent default preset selection on the node.
-4. Add microphone input and beat detection on the brain.
+4. Refine the audio lock heuristics and phase trim so `currentBpm` stays stable across full songs.
