@@ -24,15 +24,16 @@ static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
 static constexpr uint16_t TAP_FLASH_MS = 50;
 static constexpr uint32_t METER_REFRESH_MS = 40;
+static constexpr uint32_t DEBUG_STATUS_INTERVAL_MS = 1000;
 static constexpr uint32_t UI_MODE_DISPLAY_MS = 3000;
 static constexpr uint32_t BUTTON_TAP_WINDOW_MS = 450;
 static constexpr uint32_t TAP_TEMPO_TIMEOUT_MS = 1600;
 static constexpr uint16_t TAP_TEMPO_MIN_BPM = 60;
 static constexpr uint16_t TAP_TEMPO_MAX_BPM = 180;
-static constexpr uint8_t AUDIO_SYNC_CANDIDATE_CONFIDENCE = 75;
-static constexpr uint8_t AUDIO_SYNC_LOCKED_CONFIDENCE = 70;
+static constexpr uint8_t AUDIO_SYNC_CANDIDATE_CONFIDENCE = 68;
+static constexpr uint8_t AUDIO_SYNC_LOCKED_CONFIDENCE = 62;
 static constexpr uint8_t AUDIO_SYNC_REQUIRED_ONSETS = 3;
-static constexpr uint8_t AUDIO_SYNC_CANDIDATE_BPM_TOLERANCE = 2;
+static constexpr uint8_t AUDIO_SYNC_CANDIDATE_BPM_TOLERANCE = 4;
 static constexpr uint8_t AUDIO_SYNC_MAX_BPM_STEP = 1;
 static constexpr uint8_t AUDIO_SYNC_INTERVAL_MIN_PERCENT = 88;
 static constexpr uint8_t AUDIO_SYNC_INTERVAL_MAX_PERCENT = 112;
@@ -80,6 +81,7 @@ uint8_t audioSyncPhaseMissCount = 0;
 uint32_t lastAudioOnsetSeenAtMs = 0;
 uint32_t lastAudioOnsetHandledAtMs = 0;
 uint32_t lastAudioLockAtMs = 0;
+uint32_t lastDebugStatusAtMs = 0;
 decaflash::brain::PdmMicrophone microphone;
 
 static constexpr uint8_t kDigitMasks[5][5] = {
@@ -154,7 +156,7 @@ void updateClockFromAudio(uint32_t now) {
   }
 
   const bool musicPresent = microphone.musicPresent();
-  const uint16_t detectedBpm = microphone.detectedBpm();
+  const uint16_t detectedBpm = microphone.clockBpm();
   const uint8_t beatConfidence = microphone.beatConfidence();
   const uint32_t onsetAtMs = microphone.lastOnsetAtMs();
 
@@ -428,6 +430,23 @@ void updateIdleMatrixUi(uint32_t now) {
   lastMeterDrawAtMs = now;
 }
 
+void printCompactAudioDebug(uint32_t now) {
+  if ((now - lastDebugStatusAtMs) < DEBUG_STATUS_INTERVAL_MS) {
+    return;
+  }
+
+  lastDebugStatusAtMs = now;
+  Serial.printf("debug music=%u raw=%u audio=%u clock=%u conf=%u lock=%u meter=%u live=%u\n",
+                static_cast<unsigned>(microphone.musicPresent()),
+                static_cast<unsigned>(microphone.detectedBpm()),
+                static_cast<unsigned>(microphone.clockBpm()),
+                static_cast<unsigned>(currentBpm),
+                static_cast<unsigned>(microphone.beatConfidence()),
+                static_cast<unsigned>(audioClockLocked),
+                static_cast<unsigned>(microphone.meterLevel()),
+                static_cast<unsigned>(brainLive));
+}
+
 void onBeat() {
   const uint8_t currentBeat = beatInBar;
 
@@ -663,6 +682,7 @@ void loop() {
   }
 
   updateClockFromAudio(now);
+  printCompactAudioDebug(now);
 
   while (brainLive && (int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();

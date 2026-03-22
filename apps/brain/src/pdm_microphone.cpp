@@ -47,14 +47,14 @@ static constexpr uint8_t kAnalysisHistorySize = 8;
 static constexpr uint8_t kAnalysisTempoBucketCount =
   static_cast<uint8_t>(kAnalysisMaxTempoBpm - kAnalysisMinTempoBpm + 1U);
 static constexpr uint8_t kAnalysisTempoMaxMultiple = 8;
-static constexpr uint8_t kAnalysisTempoTolerancePercent = 12;
+static constexpr uint8_t kAnalysisTempoTolerancePercent = 9;
 static constexpr uint8_t kAnalysisTempoContinuityBonus = 18;
 static constexpr uint8_t kAnalysisTempoMinimumMatches = 3;
 static constexpr uint8_t kAnalysisTempoCoverageTarget = 8;
 static constexpr uint8_t kAnalysisTempoBucketDecayShift = 3;
 static constexpr uint8_t kAnalysisTempoNeighborWeightPercent = 30;
 static constexpr uint8_t kAnalysisTempoFamilyWeightPercent = 45;
-static constexpr uint8_t kAnalysisTempoDirectTolerancePercent = 10;
+static constexpr uint8_t kAnalysisTempoDirectTolerancePercent = 8;
 static constexpr uint8_t kAnalysisTempoHoldConfidence = 60;
 static constexpr uint8_t kAnalysisTempoHoldPercent = 112;
 static constexpr uint8_t kAnalysisTempoFamilyHoldPercent = 105;
@@ -66,6 +66,17 @@ static constexpr uint8_t kAnalysisTempoRepresentativePairwiseWeight = 2;
 static constexpr uint8_t kAnalysisTempoRepresentativeMemoryDivisor = 4;
 static constexpr uint8_t kAnalysisTempoRepresentativeFamilyPenalty = 5;
 static constexpr uint8_t kAnalysisTempoRepresentativeFamilyBonus = 10;
+static constexpr uint8_t kAnalysisTempoPrimaryScoreWeight = 6;
+static constexpr uint8_t kAnalysisTempoPrimaryCoverageTarget = 4;
+static constexpr uint8_t kAnalysisTempoSameFamilySwitchPercent = 125;
+static constexpr uint8_t kAnalysisClockSubdivisionSwitchHits = 4;
+static constexpr uint8_t kAnalysisHalfIntervalMinPercent = 45;
+static constexpr uint8_t kAnalysisHalfIntervalMaxPercent = 65;
+static constexpr uint8_t kAnalysisPulseHistorySize = 64;
+static constexpr uint8_t kAnalysisPulseScaleShift = 2;
+static constexpr uint8_t kAnalysisPulseScoreWeight = 6;
+static constexpr bool kVerboseMicLevelReports = false;
+static constexpr bool kVerboseMicBeatReports = false;
 
 uint16_t bpmDifference(uint16_t left, uint16_t right) {
   return (left > right) ? (left - right) : (right - left);
@@ -185,7 +196,11 @@ bool PdmMicrophone::begin() {
                 static_cast<unsigned long>(kSampleRateHz),
                 8u,
                 128u);
-  Serial.println("mic=report fields=env block mfast mslow disp avg peak dc raw_p2p floor ceil meter afast aslow afloor music onset bpm conf samples");
+  if (kVerboseMicLevelReports) {
+    Serial.println("mic=report fields=env block mfast mslow disp avg peak dc raw_p2p floor ceil meter afast aslow afloor music onset bpm conf samples");
+  } else {
+    Serial.println("mic=report compact");
+  }
   return true;
 }
 
@@ -261,6 +276,10 @@ uint8_t PdmMicrophone::beatConfidence() const {
   return beatConfidence_;
 }
 
+uint16_t PdmMicrophone::clockBpm() const {
+  return clockBpm_;
+}
+
 uint32_t PdmMicrophone::lastOnsetAtMs() const {
   return lastOnsetAtMs_;
 }
@@ -318,43 +337,33 @@ void PdmMicrophone::printReport(uint32_t now) {
     return;
   }
 
-  const uint32_t averageLevel = centeredAbsSum_ / sampleCount_;
-  const int32_t rawPeakToPeak =
-    static_cast<int32_t>(rawMaxSample_) - static_cast<int32_t>(rawMinSample_);
-
-  Serial.printf("mic=level env=%lu block=%lu mfast=%lu mslow=%lu disp=%lu avg=%lu peak=%u dc=%ld raw_p2p=%ld floor=%lu ceil=%lu meter=%u afast=%lu aslow=%lu afloor=%lu music=%u onset=%lu bpm=%u conf=%u samples=%lu\n",
-                static_cast<unsigned long>(envelopeLevel_),
-                static_cast<unsigned long>(blockLevel_),
-                static_cast<unsigned long>(meterFastLevel_),
-                static_cast<unsigned long>(meterSlowLevel_),
-                static_cast<unsigned long>(meterDisplayLevel_),
-                static_cast<unsigned long>(averageLevel),
-                static_cast<unsigned>(centeredPeakAbs_),
-                static_cast<long>(dcEstimate_),
-                static_cast<long>(rawPeakToPeak),
-                static_cast<unsigned long>(noiseFloor_),
-                static_cast<unsigned long>(signalCeiling_),
-                static_cast<unsigned>(meterLevel_),
-                static_cast<unsigned long>(analysisFastLevel_),
-                static_cast<unsigned long>(analysisSlowLevel_),
-                static_cast<unsigned long>(analysisFloor_),
-                static_cast<unsigned>(musicPresent_),
-                static_cast<unsigned long>(onsetStrength_),
-                static_cast<unsigned>(detectedBpm_),
-                static_cast<unsigned>(beatConfidence_),
-                static_cast<unsigned long>(sampleCount_));
-
-  if (lastFrameCount_ > 0 && (now - lastFramePrintAtMs_) >= kFramePrintIntervalMs) {
-    Serial.print("mic=frame_centered");
-    for (uint8_t i = 0; i < lastFrameCount_; ++i) {
-      Serial.printf(" %d", lastFrame_[i]);
-    }
-    Serial.println();
-    lastFramePrintAtMs_ = now;
-  }
-
   resetWindowStats();
   lastReportAtMs_ = now;
+}
+
+void PdmMicrophone::recordPulseFrame(uint32_t now, uint32_t transientLevel, uint32_t onsetThreshold) {
+  if (lastAnalysisFrameAtMs_ != 0) {
+    const uint32_t frameIntervalMs = now - lastAnalysisFrameAtMs_;
+    if (frameIntervalMs >= 20UL && frameIntervalMs <= 120UL) {
+      analysisFrameIntervalMs_ = static_cast<uint16_t>(
+        ((analysisFrameIntervalMs_ * 7UL) + frameIntervalMs) / 8UL
+      );
+    }
+  }
+  lastAnalysisFrameAtMs_ = now;
+
+  uint32_t pulseStrength =
+    (transientLevel > onsetThreshold) ? (transientLevel - onsetThreshold) : 0UL;
+  pulseStrength >>= kAnalysisPulseScaleShift;
+  if (pulseStrength > 255UL) {
+    pulseStrength = 255UL;
+  }
+
+  pulseHistory_[pulseHistoryIndex_] = static_cast<uint8_t>(pulseStrength);
+  pulseHistoryIndex_ = static_cast<uint8_t>((pulseHistoryIndex_ + 1U) % kAnalysisPulseHistorySize);
+  if (pulseHistoryCount_ < kAnalysisPulseHistorySize) {
+    pulseHistoryCount_++;
+  }
 }
 
 void PdmMicrophone::updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t peakLevel) {
@@ -397,8 +406,14 @@ void PdmMicrophone::updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t p
   if ((now - lastOnsetAtMs_) > kAnalysisTempoHoldMs) {
     if (!musicPresent_) {
       detectedBpm_ = 0;
+      clockBpm_ = 0;
+      clockSubdivisionCandidateBpm_ = 0;
+      clockSubdivisionCandidateCount_ = 0;
       onsetTimestampCount_ = 0;
       onsetIntervalCount_ = 0;
+      pulseHistoryCount_ = 0;
+      pulseHistoryIndex_ = 0;
+      lastAnalysisFrameAtMs_ = 0;
       for (uint32_t& bucketScore : tempoBucketScores_) {
         bucketScore = 0;
       }
@@ -406,13 +421,15 @@ void PdmMicrophone::updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t p
     beatConfidence_ = 0;
   }
 
+  const uint32_t energySpan =
+    (analysisSlowLevel_ > analysisFloor_) ? (analysisSlowLevel_ - analysisFloor_) : 0;
+  const uint32_t onsetThreshold = kAnalysisOnsetMinimum + (energySpan / kAnalysisOnsetDivisor);
+  recordPulseFrame(now, transientLevel, musicPresent_ ? onsetThreshold : UINT32_MAX);
+
   if (!musicPresent_) {
     return;
   }
 
-  const uint32_t energySpan =
-    (analysisSlowLevel_ > analysisFloor_) ? (analysisSlowLevel_ - analysisFloor_) : 0;
-  const uint32_t onsetThreshold = kAnalysisOnsetMinimum + (energySpan / kAnalysisOnsetDivisor);
   const bool cooldownElapsed =
     (lastOnsetAtMs_ == 0) || ((now - lastOnsetAtMs_) >= kAnalysisOnsetCooldownMs);
   const bool peakLooksMusical =
@@ -431,16 +448,13 @@ void PdmMicrophone::updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t p
     const uint32_t expectedIntervalMs = 60000UL / detectedBpm_;
     const uint32_t earlyIntervalMs =
       (expectedIntervalMs * kAnalysisEarlyIntervalPercent) / 100UL;
-    if (intervalMs < earlyIntervalMs) {
+    const uint32_t halfIntervalMinMs =
+      (expectedIntervalMs * kAnalysisHalfIntervalMinPercent) / 100UL;
+    const uint32_t halfIntervalMaxMs =
+      (expectedIntervalMs * kAnalysisHalfIntervalMaxPercent) / 100UL;
+    if (intervalMs < earlyIntervalMs &&
+        (intervalMs < halfIntervalMinMs || intervalMs > halfIntervalMaxMs)) {
       return;
-    }
-
-    const uint32_t doubleIntervalMinMs =
-      (expectedIntervalMs * kAnalysisDoubleIntervalMinPercent) / 100UL;
-    const uint32_t doubleIntervalMaxMs =
-      (expectedIntervalMs * kAnalysisDoubleIntervalMaxPercent) / 100UL;
-    if (intervalMs >= doubleIntervalMinMs && intervalMs <= doubleIntervalMaxMs) {
-      intervalMs /= 2UL;
     }
   }
 
@@ -475,17 +489,8 @@ void PdmMicrophone::registerOnset(uint32_t now, uint32_t onsetStrength, uint32_t
     beatConfidence_ = 0;
   }
 
-  Serial.printf("mic=beat onset=%lu interval=%lu bpm=%u conf=%u block=%lu aslow=%lu peak=%u music=%u at=%lu\n",
-                static_cast<unsigned long>(onsetStrength),
-                static_cast<unsigned long>(intervalMs),
-                static_cast<unsigned>(detectedBpm_),
-                static_cast<unsigned>(beatConfidence_),
-                static_cast<unsigned long>(blockLevel_),
-                static_cast<unsigned long>(analysisSlowLevel_),
-                static_cast<unsigned>(updatePeakAbs_),
-                static_cast<unsigned>(musicPresent_),
-                static_cast<unsigned long>(now));
 }
+
 
 void PdmMicrophone::updateTempoEstimate() {
   if (onsetTimestampCount_ < 3) {
@@ -493,19 +498,36 @@ void PdmMicrophone::updateTempoEstimate() {
   }
 
   const uint16_t previousDetectedBpm = detectedBpm_;
+  const uint16_t previousClockBpm = clockBpm_;
   const uint16_t previousFamilyBpm =
     (previousDetectedBpm == 0) ? 0 : canonicalTempoFamilyBpm(previousDetectedBpm);
   uint32_t instantScores[kAnalysisTempoBucketCount] = {0};
   uint32_t instantErrorSums[kAnalysisTempoBucketCount] = {0};
   uint8_t instantMatchCounts[kAnalysisTempoBucketCount] = {0};
+  uint32_t primaryScores[kAnalysisTempoBucketCount] = {0};
+  uint8_t primaryMatchCounts[kAnalysisTempoBucketCount] = {0};
   uint32_t exactIntervalScores[kAnalysisTempoBucketCount] = {0};
+  uint32_t pulseScores[kAnalysisTempoBucketCount] = {0};
   uint32_t combinedScores[kAnalysisTempoBucketCount] = {0};
   uint32_t familyScores[kAnalysisTempoBucketCount] = {0};
+  uint8_t pulseFrames[kAnalysisPulseHistorySize] = {0};
+
+  if (pulseHistoryCount_ > 0) {
+    for (uint8_t i = 0; i < pulseHistoryCount_; ++i) {
+      const uint8_t historyIndex = static_cast<uint8_t>(
+        (pulseHistoryIndex_ + kAnalysisPulseHistorySize - pulseHistoryCount_ + i) %
+        kAnalysisPulseHistorySize
+      );
+      pulseFrames[i] = pulseHistory_[historyIndex];
+    }
+  }
 
   for (uint16_t bpm = kAnalysisMinTempoBpm; bpm <= kAnalysisMaxTempoBpm; ++bpm) {
     uint32_t score = 0;
     uint32_t errorSum = 0;
     uint8_t matchCount = 0;
+    uint32_t primaryScore = 0;
+    uint8_t primaryMatchCount = 0;
 
     for (uint8_t newer = 1; newer < onsetTimestampCount_; ++newer) {
       for (uint8_t older = 0; older < newer; ++older) {
@@ -538,9 +560,20 @@ void PdmMicrophone::updateTempoEstimate() {
         const uint32_t recencyWeight = 1UL + newer;
         const uint32_t multipleWeight =
           (kAnalysisTempoMaxMultiple + 1UL) - candidateMultiple;
-        score += (recencyWeight * multipleWeight * 8UL) + (toleranceMs - errorMs);
+        const uint32_t matchScore =
+          (recencyWeight * multipleWeight * 8UL) + (toleranceMs - errorMs);
+        score += matchScore;
         errorSum += errorMs;
         matchCount++;
+
+        if (candidateMultiple == 1UL) {
+          primaryScore += matchScore * 2UL;
+          if (primaryMatchCount < 0xFFU) {
+            primaryMatchCount++;
+          }
+        } else if (candidateMultiple == 2UL) {
+          primaryScore += matchScore / 4UL;
+        }
       }
     }
 
@@ -548,6 +581,8 @@ void PdmMicrophone::updateTempoEstimate() {
     instantScores[bucketIndex] = score;
     instantErrorSums[bucketIndex] = errorSum;
     instantMatchCounts[bucketIndex] = matchCount;
+    primaryScores[bucketIndex] = primaryScore;
+    primaryMatchCounts[bucketIndex] = primaryMatchCount;
   }
 
   for (uint8_t intervalIndex = 0; intervalIndex < onsetIntervalCount_; ++intervalIndex) {
@@ -575,9 +610,33 @@ void PdmMicrophone::updateTempoEstimate() {
     }
   }
 
+  if (pulseHistoryCount_ >= 8 && analysisFrameIntervalMs_ != 0) {
+    for (uint16_t bpm = kAnalysisMinTempoBpm; bpm <= kAnalysisMaxTempoBpm; ++bpm) {
+      const uint8_t bucketIndex = static_cast<uint8_t>(bpm - kAnalysisMinTempoBpm);
+      const uint32_t expectedIntervalMs = 60000UL / bpm;
+      const uint32_t lagFrames =
+        (expectedIntervalMs + (analysisFrameIntervalMs_ / 2U)) / analysisFrameIntervalMs_;
+      if (lagFrames < 2UL || lagFrames >= pulseHistoryCount_) {
+        continue;
+      }
+
+      uint32_t pulseScore = 0;
+      for (uint8_t newer = static_cast<uint8_t>(lagFrames); newer < pulseHistoryCount_; ++newer) {
+        const uint8_t currentPulse = pulseFrames[newer];
+        const uint8_t laggedPulse = pulseFrames[newer - static_cast<uint8_t>(lagFrames)];
+        if (currentPulse == 0 || laggedPulse == 0) {
+          continue;
+        }
+        pulseScore += (currentPulse < laggedPulse) ? currentPulse : laggedPulse;
+      }
+
+      pulseScores[bucketIndex] = pulseScore;
+    }
+  }
+
   for (uint8_t i = 0; i < kAnalysisTempoBucketCount; ++i) {
     tempoBucketScores_[i] -= tempoBucketScores_[i] >> kAnalysisTempoBucketDecayShift;
-    tempoBucketScores_[i] += instantScores[i];
+    tempoBucketScores_[i] += instantScores[i] + primaryScores[i] + (pulseScores[i] / 2UL);
   }
 
   for (uint8_t i = 0; i < kAnalysisTempoBucketCount; ++i) {
@@ -586,7 +645,10 @@ void PdmMicrophone::updateTempoEstimate() {
     }
 
     const uint16_t bpm = static_cast<uint16_t>(kAnalysisMinTempoBpm + i);
-    uint32_t score = tempoBucketScores_[i] + (exactIntervalScores[i] * 2UL);
+    uint32_t score = tempoBucketScores_[i] +
+                     (exactIntervalScores[i] * 2UL) +
+                     (primaryScores[i] * kAnalysisTempoPrimaryScoreWeight) +
+                     (pulseScores[i] * kAnalysisPulseScoreWeight);
     if (i > 0) {
       score += (tempoBucketScores_[i - 1] * kAnalysisTempoNeighborWeightPercent) / 100UL;
     }
@@ -662,6 +724,10 @@ void PdmMicrophone::updateTempoEstimate() {
   uint32_t bestRepresentativeScore = 0;
   uint32_t bestErrorSum = 0;
   uint8_t bestMatchCount = 0;
+  const uint8_t familyAnchorIndex =
+    static_cast<uint8_t>(bestFamilyBpm - kAnalysisMinTempoBpm);
+  const uint32_t familyAnchorPrimaryScore = primaryScores[familyAnchorIndex];
+  const uint8_t familyAnchorPrimaryMatches = primaryMatchCounts[familyAnchorIndex];
 
   for (uint8_t i = 0; i < kAnalysisTempoBucketCount; ++i) {
     const uint16_t bpm = static_cast<uint16_t>(kAnalysisMinTempoBpm + i);
@@ -674,7 +740,9 @@ void PdmMicrophone::updateTempoEstimate() {
 
     uint32_t candidateScore =
       (instantScores[i] * kAnalysisTempoRepresentativePairwiseWeight) +
+      (primaryScores[i] * (kAnalysisTempoPrimaryScoreWeight + 2UL)) +
       exactIntervalScores[i] +
+      (pulseScores[i] * (kAnalysisPulseScoreWeight + 2UL)) +
       (tempoBucketScores_[i] / kAnalysisTempoRepresentativeMemoryDivisor);
 
     if (i > 0) {
@@ -689,9 +757,13 @@ void PdmMicrophone::updateTempoEstimate() {
       candidateScore += static_cast<uint32_t>(kAnalysisTempoContinuityBonus *
                                               kAnalysisTempoRepresentativeFamilyBonus);
     } else {
-      const uint32_t familyPenalty = static_cast<uint32_t>(familyDistance) *
-                                     kAnalysisTempoContinuityBonus *
-                                     kAnalysisTempoRepresentativeFamilyPenalty;
+      uint32_t familyPenalty = static_cast<uint32_t>(familyDistance) *
+                               kAnalysisTempoContinuityBonus *
+                               kAnalysisTempoRepresentativeFamilyPenalty;
+      if (primaryScores[i] > familyAnchorPrimaryScore ||
+          primaryMatchCounts[i] > familyAnchorPrimaryMatches) {
+        familyPenalty /= 4UL;
+      }
       candidateScore = (candidateScore > familyPenalty) ? (candidateScore - familyPenalty) : 0UL;
     }
 
@@ -726,8 +798,7 @@ void PdmMicrophone::updateTempoEstimate() {
     precisionScore = (precisionPenalty >= 100UL) ? 0UL : (100UL - precisionPenalty);
   }
 
-  uint32_t coverageScore =
-    (bestMatchCount * 100UL) / kAnalysisTempoCoverageTarget;
+  uint32_t coverageScore = (bestMatchCount * 100UL) / kAnalysisTempoCoverageTarget;
   if (coverageScore > 100UL) {
     coverageScore = 100UL;
   }
@@ -736,6 +807,12 @@ void PdmMicrophone::updateTempoEstimate() {
     (bestFamilyScore > 0 && bestFamilyScore > secondBestFamilyScore)
       ? ((bestFamilyScore - secondBestFamilyScore) * 100UL) / bestFamilyScore
       : 0UL;
+
+  uint32_t primaryCoverageScore =
+    (primaryMatchCounts[bestBucketIndex] * 100UL) / kAnalysisTempoPrimaryCoverageTarget;
+  if (primaryCoverageScore > 100UL) {
+    primaryCoverageScore = 100UL;
+  }
 
   uint32_t continuityScore = 60UL;
   if (previousFamilyBpm != 0) {
@@ -749,16 +826,89 @@ void PdmMicrophone::updateTempoEstimate() {
   }
 
   const uint32_t confidence =
-    ((precisionScore * 2UL) + coverageScore + separationScore + continuityScore) / 5UL;
+    ((precisionScore * 2UL) + coverageScore + primaryCoverageScore + separationScore +
+     continuityScore) / 6UL;
   beatConfidence_ = static_cast<uint8_t>((confidence > 100UL) ? 100UL : confidence);
 
   const uint16_t bestRawBpm = static_cast<uint16_t>(kAnalysisMinTempoBpm + bestBucketIndex);
-  if (previousDetectedBpm == 0 ||
-      !inSameTempoFamily(previousDetectedBpm, bestRawBpm) ||
-      bpmDifference(previousDetectedBpm, bestRawBpm) >= 6U) {
-    detectedBpm_ = bestRawBpm;
+  uint16_t resolvedRawBpm = bestRawBpm;
+  if (previousDetectedBpm != 0 && inSameTempoFamily(previousDetectedBpm, bestRawBpm)) {
+    const uint8_t previousBucketIndex =
+      static_cast<uint8_t>(previousDetectedBpm - kAnalysisMinTempoBpm);
+    const uint32_t previousFamilySupport =
+      (primaryScores[previousBucketIndex] * kAnalysisTempoPrimaryScoreWeight) +
+      exactIntervalScores[previousBucketIndex] + pulseScores[previousBucketIndex];
+    const uint32_t bestFamilySupport =
+      (primaryScores[bestBucketIndex] * kAnalysisTempoPrimaryScoreWeight) +
+      exactIntervalScores[bestBucketIndex] + pulseScores[bestBucketIndex];
+
+    if (bpmDifference(previousDetectedBpm, bestRawBpm) >= 6U && previousFamilySupport > 0 &&
+        (bestFamilySupport * 100UL) <
+          (previousFamilySupport * kAnalysisTempoSameFamilySwitchPercent)) {
+      resolvedRawBpm = previousDetectedBpm;
+    } else if (bpmDifference(previousDetectedBpm, bestRawBpm) <= 2U) {
+      resolvedRawBpm =
+        static_cast<uint16_t>((previousDetectedBpm + bestRawBpm + 1U) / 2U);
+    }
+  }
+  detectedBpm_ = resolvedRawBpm;
+
+  uint16_t resolvedClockBpm = detectedBpm_;
+  const uint16_t canonicalClockBpm = canonicalTempoFamilyBpm(detectedBpm_);
+  if (canonicalClockBpm > detectedBpm_ && canonicalClockBpm >= kAnalysisTempoFamilyPreferredMinBpm) {
+    uint32_t fastFamilyEvidence = 0;
+    uint8_t fastFamilyMatches = 0;
+
+    for (uint8_t i = 0; i < kAnalysisTempoBucketCount; ++i) {
+      const uint16_t bpm = static_cast<uint16_t>(kAnalysisMinTempoBpm + i);
+      if (!inSameTempoFamily(detectedBpm_, bpm)) {
+        continue;
+      }
+      if ((bpm + 6U) < canonicalClockBpm) {
+        continue;
+      }
+
+      const uint32_t evidence =
+        (primaryScores[i] * kAnalysisTempoPrimaryScoreWeight) +
+        exactIntervalScores[i] +
+        (pulseScores[i] * kAnalysisPulseScoreWeight);
+      if (evidence > fastFamilyEvidence) {
+        fastFamilyEvidence = evidence;
+        fastFamilyMatches = primaryMatchCounts[i];
+      }
+    }
+
+    if (fastFamilyEvidence > 0 &&
+        (fastFamilyMatches > 0 ||
+         (fastFamilyEvidence * 100UL) >= (bestRepresentativeScore * 35UL))) {
+      resolvedClockBpm = canonicalClockBpm;
+    }
+  }
+
+  uint16_t targetClockBpm = resolvedClockBpm;
+  if (previousClockBpm != 0 && inSameTempoFamily(previousClockBpm, resolvedClockBpm) &&
+      (resolvedClockBpm + 6U) < previousClockBpm) {
+    if (clockSubdivisionCandidateCount_ == 0 ||
+        bpmDifference(clockSubdivisionCandidateBpm_, resolvedClockBpm) > 2U) {
+      clockSubdivisionCandidateBpm_ = resolvedClockBpm;
+      clockSubdivisionCandidateCount_ = 1;
+      targetClockBpm = previousClockBpm;
+    } else if (clockSubdivisionCandidateCount_ < kAnalysisClockSubdivisionSwitchHits) {
+      clockSubdivisionCandidateCount_++;
+      targetClockBpm = previousClockBpm;
+    } else {
+      targetClockBpm = clockSubdivisionCandidateBpm_;
+    }
   } else {
-    detectedBpm_ = static_cast<uint16_t>((previousDetectedBpm + bestRawBpm + 1U) / 2U);
+    clockSubdivisionCandidateBpm_ = 0;
+    clockSubdivisionCandidateCount_ = 0;
+  }
+
+  if (previousClockBpm != 0 && inSameTempoFamily(previousClockBpm, targetClockBpm) &&
+      bpmDifference(previousClockBpm, targetClockBpm) <= 2U) {
+    clockBpm_ = static_cast<uint16_t>((previousClockBpm + targetClockBpm + 1U) / 2U);
+  } else {
+    clockBpm_ = targetClockBpm;
   }
 }
 

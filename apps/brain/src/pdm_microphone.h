@@ -12,6 +12,7 @@ class PdmMicrophone {
   uint8_t meterLevel() const;
   bool musicPresent() const;
   uint16_t detectedBpm() const;
+  uint16_t clockBpm() const;
   uint8_t beatConfidence() const;
   uint32_t lastOnsetAtMs() const;
 
@@ -19,6 +20,7 @@ class PdmMicrophone {
   void resetWindowStats();
   void accumulateSamples(const int16_t* samples, size_t sampleCount);
   void printReport(uint32_t now);
+  void recordPulseFrame(uint32_t now, uint32_t transientLevel, uint32_t onsetThreshold);
   void updateAnalysis(uint32_t now, uint32_t blockLevel, uint16_t peakLevel);
   void updateMeterLevel(uint32_t blockLevel);
   void registerOnset(uint32_t now, uint32_t onsetStrength, uint32_t intervalMs);
@@ -54,6 +56,9 @@ class PdmMicrophone {
   uint32_t onsetStrength_ = 0;
   uint32_t lastOnsetAtMs_ = 0;
   uint16_t detectedBpm_ = 0;
+  uint16_t clockBpm_ = 0;
+  uint16_t clockSubdivisionCandidateBpm_ = 0;
+  uint8_t clockSubdivisionCandidateCount_ = 0;
   uint8_t beatConfidence_ = 0;
   bool musicPresent_ = false;
   uint8_t onsetTimestampCount_ = 0;
@@ -61,6 +66,11 @@ class PdmMicrophone {
   uint8_t onsetIntervalCount_ = 0;
   uint32_t onsetIntervalsMs_[8] = {0};
   uint32_t tempoBucketScores_[101] = {0};
+  uint32_t lastAnalysisFrameAtMs_ = 0;
+  uint16_t analysisFrameIntervalMs_ = 64;
+  uint8_t pulseHistoryCount_ = 0;
+  uint8_t pulseHistoryIndex_ = 0;
+  uint8_t pulseHistory_[64] = {0};
 };
 
 }  // namespace decaflash::brain
