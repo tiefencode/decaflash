@@ -17,8 +17,17 @@ static constexpr uint32_t kReportIntervalMs = 1000;
 static constexpr uint32_t kFramePrintIntervalMs = 4000;
 static constexpr uint8_t kDcEstimateShift = 6;
 static constexpr uint8_t kEnvelopeShift = 4;
-static constexpr uint32_t kMeterFloorMargin = 12;
-static constexpr uint32_t kMeterMinimumSpan = 120;
+static constexpr uint32_t kMeterFloorMargin = 6;
+static constexpr uint32_t kMeterGateMargin = 10;
+static constexpr uint32_t kMeterDisplayMargin = 18;
+static constexpr uint32_t kMeterMinimumSpan = 180;
+static constexpr uint32_t kMeterHeadroomExtra = 140;
+static constexpr uint32_t kMeterBeatMargin = 18;
+static constexpr uint32_t kMeterBeatSpan = 140;
+static constexpr uint8_t kMeterBasePixels = 20;
+static constexpr uint8_t kMeterBeatPixels = 5;
+static constexpr uint8_t kMeterQuietCyclesForZero = 4;
+static constexpr uint8_t kMeterReleaseStep = 2;
 
 }  // namespace
 
@@ -73,7 +82,7 @@ bool PdmMicrophone::begin() {
                 static_cast<unsigned long>(kSampleRateHz),
                 8u,
                 128u);
-  Serial.println("mic=report fields=env avg peak dc raw_p2p samples");
+  Serial.println("mic=report fields=env block fast slow disp avg peak dc raw_p2p floor ceil meter samples");
   return true;
 }
 
@@ -84,6 +93,8 @@ void PdmMicrophone::update() {
 
   int16_t sampleBuffer[kReadBufferSampleCount] = {0};
   bool readAnySamples = false;
+  updateAbsSum_ = 0;
+  updateSampleCount_ = 0;
 
   for (uint8_t attempt = 0; attempt < 4; ++attempt) {
     size_t bytesRead = 0;
@@ -112,9 +123,13 @@ void PdmMicrophone::update() {
     accumulateSamples(sampleBuffer, bytesRead / sizeof(int16_t));
   }
 
+  if (updateSampleCount_ > 0) {
+    blockLevel_ = updateAbsSum_ / updateSampleCount_;
+  }
+
   const uint32_t now = millis();
   if (readAnySamples) {
-    updateMeterLevel();
+    updateMeterLevel(blockLevel_);
   }
   if (readAnySamples && (now - lastReportAtMs_) >= kReportIntervalMs) {
     printReport(now);
@@ -166,6 +181,8 @@ void PdmMicrophone::accumulateSamples(const int16_t* samples, size_t sampleCount
     }
 
     centeredAbsSum_ += absCenteredSample;
+    updateAbsSum_ += absCenteredSample;
+    updateSampleCount_++;
     envelopeLevel_ =
       ((envelopeLevel_ * ((1UL << kEnvelopeShift) - 1UL)) + absCenteredSample) >> kEnvelopeShift;
     sampleCount_++;
@@ -181,12 +198,19 @@ void PdmMicrophone::printReport(uint32_t now) {
   const int32_t rawPeakToPeak =
     static_cast<int32_t>(rawMaxSample_) - static_cast<int32_t>(rawMinSample_);
 
-  Serial.printf("mic=level env=%lu avg=%lu peak=%u dc=%ld raw_p2p=%ld samples=%lu\n",
+  Serial.printf("mic=level env=%lu block=%lu fast=%lu slow=%lu disp=%lu avg=%lu peak=%u dc=%ld raw_p2p=%ld floor=%lu ceil=%lu meter=%u samples=%lu\n",
                 static_cast<unsigned long>(envelopeLevel_),
+                static_cast<unsigned long>(blockLevel_),
+                static_cast<unsigned long>(meterFastLevel_),
+                static_cast<unsigned long>(meterSlowLevel_),
+                static_cast<unsigned long>(meterDisplayLevel_),
                 static_cast<unsigned long>(averageLevel),
                 static_cast<unsigned>(centeredPeakAbs_),
                 static_cast<long>(dcEstimate_),
                 static_cast<long>(rawPeakToPeak),
+                static_cast<unsigned long>(noiseFloor_),
+                static_cast<unsigned long>(signalCeiling_),
+                static_cast<unsigned>(meterLevel_),
                 static_cast<unsigned long>(sampleCount_));
 
   if (lastFrameCount_ > 0 && (now - lastFramePrintAtMs_) >= kFramePrintIntervalMs) {
@@ -202,41 +226,111 @@ void PdmMicrophone::printReport(uint32_t now) {
   lastReportAtMs_ = now;
 }
 
-void PdmMicrophone::updateMeterLevel() {
-  const uint32_t envelope = envelopeLevel_;
-
-  if (noiseFloor_ == 0) {
-    noiseFloor_ = envelope;
-  } else if (envelope < noiseFloor_) {
-    noiseFloor_ = ((noiseFloor_ * 7UL) + envelope) / 8UL;
+void PdmMicrophone::updateMeterLevel(uint32_t blockLevel) {
+  if (meterFastLevel_ == 0) {
+    meterFastLevel_ = blockLevel;
+  } else if (blockLevel > meterFastLevel_) {
+    meterFastLevel_ = ((meterFastLevel_ * 3UL) + blockLevel) / 4UL;
   } else {
-    noiseFloor_ = ((noiseFloor_ * 127UL) + envelope) / 128UL;
+    meterFastLevel_ = ((meterFastLevel_ * 7UL) + blockLevel) / 8UL;
   }
 
-  if (envelope > signalCeiling_) {
-    signalCeiling_ = envelope;
+  if (meterSlowLevel_ == 0) {
+    meterSlowLevel_ = blockLevel;
+  } else if (blockLevel > meterSlowLevel_) {
+    meterSlowLevel_ = ((meterSlowLevel_ * 7UL) + blockLevel) / 8UL;
   } else {
-    signalCeiling_ = ((signalCeiling_ * 63UL) + envelope) / 64UL;
+    meterSlowLevel_ = ((meterSlowLevel_ * 15UL) + blockLevel) / 16UL;
+  }
+
+  const uint32_t transientLevel =
+    (meterFastLevel_ > meterSlowLevel_) ? (meterFastLevel_ - meterSlowLevel_) : 0;
+
+  meterDisplayLevel_ = meterSlowLevel_ + (transientLevel / 4UL);
+
+  if (noiseFloor_ == 0) {
+    noiseFloor_ = meterSlowLevel_;
+  } else if (meterSlowLevel_ < noiseFloor_) {
+    noiseFloor_ = ((noiseFloor_ * 7UL) + meterSlowLevel_) / 8UL;
+  } else {
+    noiseFloor_ = ((noiseFloor_ * 127UL) + meterSlowLevel_) / 128UL;
+  }
+
+  if (meterSlowLevel_ > signalCeiling_) {
+    signalCeiling_ = ((signalCeiling_ * 3UL) + meterSlowLevel_) / 4UL;
+  } else {
+    signalCeiling_ = ((signalCeiling_ * 15UL) + meterSlowLevel_) / 16UL;
   }
 
   const uint32_t effectiveFloor = noiseFloor_ + kMeterFloorMargin;
-  uint32_t span = 0;
-  if (signalCeiling_ > effectiveFloor) {
-    span = signalCeiling_ - effectiveFloor;
-  }
-  if (span < kMeterMinimumSpan) {
-    span = kMeterMinimumSpan;
+  const uint32_t gateThreshold = effectiveFloor + kMeterGateMargin;
+  const uint32_t displayThreshold = gateThreshold + kMeterDisplayMargin;
+
+  if (meterSlowLevel_ <= gateThreshold) {
+    if (quietCycleCount_ < kMeterQuietCyclesForZero) {
+      quietCycleCount_++;
+    }
+
+    if (signalCeiling_ > gateThreshold) {
+      signalCeiling_ = ((signalCeiling_ * 3UL) + gateThreshold) / 4UL;
+    }
+
+    if (quietCycleCount_ >= kMeterQuietCyclesForZero) {
+      meterLevel_ = 0;
+      return;
+    }
+
+    meterLevel_ = (meterLevel_ > kMeterReleaseStep) ? (meterLevel_ - kMeterReleaseStep) : 0;
+    return;
   }
 
-  uint32_t normalized = 0;
-  if (envelope > effectiveFloor) {
-    normalized = envelope - effectiveFloor;
-    if (normalized > span) {
-      normalized = span;
+  quietCycleCount_ = 0;
+
+  uint32_t baseSpan = kMeterMinimumSpan;
+  if (signalCeiling_ > displayThreshold) {
+    baseSpan = (signalCeiling_ - displayThreshold) + kMeterHeadroomExtra;
+    if (baseSpan < kMeterMinimumSpan) {
+      baseSpan = kMeterMinimumSpan;
     }
   }
 
-  meterLevel_ = static_cast<uint8_t>((normalized * 25UL) / span);
+  uint32_t baseNormalized = 0;
+  if (meterSlowLevel_ > displayThreshold) {
+    baseNormalized = meterSlowLevel_ - displayThreshold;
+    if (baseNormalized > baseSpan) {
+      baseNormalized = baseSpan;
+    }
+  }
+
+  uint8_t baseLevel = static_cast<uint8_t>((baseNormalized * kMeterBasePixels) / baseSpan);
+  if (baseLevel <= 1) {
+    baseLevel = 0;
+  }
+
+  uint32_t beatNormalized = 0;
+  if (transientLevel > kMeterBeatMargin) {
+    beatNormalized = transientLevel - kMeterBeatMargin;
+    if (beatNormalized > kMeterBeatSpan) {
+      beatNormalized = kMeterBeatSpan;
+    }
+  }
+
+  const uint8_t beatLevel =
+    static_cast<uint8_t>((beatNormalized * kMeterBeatPixels) / kMeterBeatSpan);
+
+  uint8_t targetLevel = static_cast<uint8_t>(baseLevel + beatLevel);
+  if (targetLevel > 25) {
+    targetLevel = 25;
+  }
+
+  if (targetLevel >= meterLevel_) {
+    meterLevel_ = targetLevel;
+    return;
+  }
+
+  const uint8_t releasedLevel =
+    (meterLevel_ > kMeterReleaseStep) ? (meterLevel_ - kMeterReleaseStep) : 0;
+  meterLevel_ = (releasedLevel > targetLevel) ? releasedLevel : targetLevel;
 }
 
 }  // namespace decaflash::brain

@@ -22,6 +22,7 @@ static constexpr uint32_t COMMAND_REFRESH_MS = 10000;
 static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t MATRIX_FLASH_MS = 50;
+static constexpr uint32_t METER_REFRESH_MS = 40;
 static constexpr uint32_t UI_MODE_DISPLAY_MS = 3000;
 static constexpr uint32_t BUTTON_TAP_WINDOW_MS = 450;
 static constexpr uint32_t TAP_TEMPO_TIMEOUT_MS = 1600;
@@ -48,6 +49,7 @@ uint32_t pendingSingleTapAtMs = 0;
 uint32_t lastTapAtMs = 0;
 uint32_t tapIntervalsMs[3] = {0, 0, 0};
 uint8_t tapIntervalCount = 0;
+uint32_t lastMeterDrawAtMs = 0;
 decaflash::brain::PdmMicrophone microphone;
 
 static constexpr uint8_t kDigitMasks[5][5] = {
@@ -128,6 +130,48 @@ void drawTapTempoFlash() {
   }
 
   matrixOffAtMs = millis() + MATRIX_FLASH_MS;
+}
+
+uint32_t meterColorForRow(uint8_t rowFromBottom) {
+  switch (rowFromBottom) {
+    case 0:
+    case 1:
+      return color(0, 110, 18);
+    case 2:
+      return color(130, 120, 0);
+    case 3:
+      return color(160, 60, 0);
+    default:
+      return color(180, 0, 0);
+  }
+}
+
+void drawMicrophoneMeter(uint8_t filledPixels) {
+  clearMatrix();
+
+  for (uint8_t slot = 0; slot < 25; ++slot) {
+    if (slot >= filledPixels) {
+      break;
+    }
+
+    const uint8_t rowFromBottom = slot / 5;
+    const uint8_t x = slot % 5;
+    const uint8_t y = 4 - rowFromBottom;
+    M5.dis.drawpix(y * 5 + x, meterColorForRow(rowFromBottom));
+  }
+}
+
+void updateIdleMatrixUi(uint32_t now) {
+  if (uiFeedbackUntilMs != 0 || tapTempoUiUntilMs != 0 || matrixOffAtMs != 0) {
+    return;
+  }
+
+  if ((now - lastMeterDrawAtMs) < METER_REFRESH_MS) {
+    return;
+  }
+
+  drawMicrophoneMeter(microphone.meterLevel());
+  lastMeterDrawAtMs = now;
 }
 
 void onBeat() {
@@ -371,4 +415,6 @@ void loop() {
     sendCurrentCommand();
     nextSendAtMs += COMMAND_REFRESH_MS;
   }
+
+  updateIdleMatrixUi(now);
 }

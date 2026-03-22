@@ -140,6 +140,7 @@ Current preprocessing is intentionally still small:
 
 - slow DC estimate for offset removal
 - smoothed envelope level for quick live monitoring
+- 5x5 matrix VU meter when no tap/mode/beat UI is active
 - no onset logic or beat detection yet
 
 ## Current Node Demo
