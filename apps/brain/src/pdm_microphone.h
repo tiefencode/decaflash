@@ -56,8 +56,11 @@ class PdmMicrophone {
   uint16_t detectedBpm_ = 0;
   uint8_t beatConfidence_ = 0;
   bool musicPresent_ = false;
+  uint8_t onsetTimestampCount_ = 0;
+  uint32_t onsetTimestampsMs_[8] = {0};
   uint8_t onsetIntervalCount_ = 0;
-  uint32_t onsetIntervalsMs_[6] = {0};
+  uint32_t onsetIntervalsMs_[8] = {0};
+  uint32_t tempoBucketScores_[101] = {0};
 };
 
 }  // namespace decaflash::brain
