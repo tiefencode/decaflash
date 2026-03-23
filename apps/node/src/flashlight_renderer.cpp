@@ -10,7 +10,7 @@ void FlashlightRenderer::allOff() {
   delay(8);
 }
 
-void FlashlightRenderer::setCommand(const decaflash::NodeCommand& command) {
+void FlashlightRenderer::setCommand(const decaflash::FlashCommand& command) {
   (void)command;
 }
 
@@ -18,6 +18,10 @@ void FlashlightRenderer::flash100(uint16_t flashMs) {
   sendFlashPreset(kPresetShort100);
   delay(flashMs);
   allOff();
+}
+
+void FlashlightRenderer::service(uint32_t now) {
+  (void)now;
 }
 
 void FlashlightRenderer::sendFlashPreset(uint8_t preset) {

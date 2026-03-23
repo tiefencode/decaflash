@@ -1,23 +1,21 @@
 #pragma once
 
-#include "command_examples.h"
+#include "scene_programs.h"
 
 namespace decaflash::node {
 
-struct ProgramSet {
-  const NodeCommand* programs;
-  size_t count;
-};
+static constexpr size_t kSceneCount = decaflash::scenes::kSceneCount;
 
-inline ProgramSet programSetFor(NodeKind nodeKind) {
-  switch (nodeKind) {
-    case NodeKind::RgbStrip:
-      return {decaflash::examples::kRgbCommands, decaflash::examples::kRgbCommandCount};
+inline const char* sceneName(size_t sceneIndex) {
+  return decaflash::scenes::sceneName(sceneIndex);
+}
 
-    case NodeKind::Flashlight:
-    default:
-      return {decaflash::examples::kFlashCommands, decaflash::examples::kFlashCommandCount};
-  }
+inline const FlashCommand& flashSceneCommandFor(NodeEffect effect, size_t sceneIndex) {
+  return decaflash::scenes::flashSceneCommandFor(effect, sceneIndex);
+}
+
+inline const RgbCommand& rgbSceneCommandFor(NodeEffect effect, size_t sceneIndex) {
+  return decaflash::scenes::rgbSceneCommandFor(effect, sceneIndex);
 }
 
 }  // namespace decaflash::node

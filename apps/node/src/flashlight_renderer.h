@@ -10,13 +10,13 @@ class FlashlightRenderer {
 
   void begin();
   void allOff();
-  void setCommand(const decaflash::NodeCommand& command);
+  void setCommand(const decaflash::FlashCommand& command);
   void flash100(uint16_t flashMs);
+  void service(uint32_t now);
 
  private:
   void sendFlashPreset(uint8_t preset);
 
   static constexpr int kFlashPin = 26;
-
   static constexpr uint8_t kPresetShort100 = 1;
 };

@@ -4,14 +4,15 @@
 
 namespace decaflash::protocol {
 
-static constexpr uint16_t kProtocolVersion = 1;
+static constexpr uint16_t kProtocolVersion = 3;
 static constexpr uint32_t kProtocolMagic = 0x4443464C;  // DCFL
 
 enum class MessageType : uint8_t {
-  NodeCommand = 1,
-  NodeStatus = 2,
-  ClockSync = 3,
-  BrainHello = 4,
+  FlashCommand = 1,
+  RgbCommand = 2,
+  NodeStatus = 3,
+  ClockSync = 4,
+  BrainHello = 5,
 };
 
 struct MessageHeader {
@@ -21,12 +22,22 @@ struct MessageHeader {
   uint8_t reserved;
 };
 
-struct NodeCommandMessage {
+struct FlashCommandMessage {
   MessageHeader header;
   uint32_t commandRevision;
   NodeKind targetNodeKind;
-  uint8_t reserved0[3];
-  NodeCommand command;
+  NodeEffect targetNodeEffect;
+  uint8_t reserved0[2];
+  FlashCommand command;
+};
+
+struct RgbCommandMessage {
+  MessageHeader header;
+  uint32_t commandRevision;
+  NodeKind targetNodeKind;
+  NodeEffect targetNodeEffect;
+  uint8_t reserved0[2];
+  RgbCommand command;
 };
 
 struct NodeStatusMessage {
@@ -62,16 +73,34 @@ constexpr MessageHeader makeHeader(MessageType type) {
   };
 }
 
-constexpr NodeCommandMessage makeNodeCommandMessage(
+constexpr FlashCommandMessage makeFlashCommandMessage(
   NodeKind targetNodeKind,
-  const NodeCommand& command,
+  NodeEffect targetNodeEffect,
+  const FlashCommand& command,
   uint32_t commandRevision
 ) {
-  return NodeCommandMessage{
-    makeHeader(MessageType::NodeCommand),
+  return FlashCommandMessage{
+    makeHeader(MessageType::FlashCommand),
     commandRevision,
     targetNodeKind,
-    {0, 0, 0},
+    targetNodeEffect,
+    {0, 0},
+    command,
+  };
+}
+
+constexpr RgbCommandMessage makeRgbCommandMessage(
+  NodeKind targetNodeKind,
+  NodeEffect targetNodeEffect,
+  const RgbCommand& command,
+  uint32_t commandRevision
+) {
+  return RgbCommandMessage{
+    makeHeader(MessageType::RgbCommand),
+    commandRevision,
+    targetNodeKind,
+    targetNodeEffect,
+    {0, 0},
     command,
   };
 }

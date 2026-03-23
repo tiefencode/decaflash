@@ -10,26 +10,28 @@ class RgbStripRenderer {
 
   void begin();
   void allOff();
-  void setCommand(const decaflash::NodeCommand& command);
+  void setNodeEffect(decaflash::NodeEffect nodeEffect);
+  void setCommand(const decaflash::RgbCommand& command);
   void flash100(uint16_t flashMs);
+  void triggerAccent();
+  void service(uint32_t now);
 
  private:
-  struct Palette {
-    uint8_t primaryR;
-    uint8_t primaryG;
-    uint8_t primaryB;
-    uint8_t accentR;
-    uint8_t accentG;
-    uint8_t accentB;
-  };
-
-  Palette paletteForCommand(const decaflash::NodeCommand& command) const;
   void renderSolid(uint8_t red, uint8_t green, uint8_t blue);
+  void renderBreathe(uint32_t now);
+  void renderBeatPulse(uint32_t now);
+  void renderAccent(uint32_t now);
+  void renderRunnerFlicker(uint32_t now);
+  uint8_t breatheLevel(uint32_t now, uint8_t low, uint8_t high) const;
+  uint8_t accentLevel(uint32_t now, uint8_t low, uint8_t high) const;
+  uint8_t clampLevel(uint16_t level) const;
   void runStartupProbe();
-  void renderPulse();
 
-  decaflash::NodeCommand currentCommand_ = {};
-  uint16_t pulseIndex_ = 0;
+  decaflash::NodeEffect nodeEffect_ = decaflash::NodeEffect::Pulse;
+  decaflash::RgbCommand currentCommand_ = {};
+  uint32_t effectStartedAtMs_ = 0;
+  uint32_t accentStartedAtMs_ = 0;
+  uint32_t accentEndsAtMs_ = 0;
   bool initialized_ = false;
 
   static constexpr uint8_t kLedCount = 15;

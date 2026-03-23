@@ -14,31 +14,78 @@ enum class DeviceType : uint8_t {
 enum class NodeKind : uint8_t {
   Flashlight = 0,
   RgbStrip = 1,
+  UvLed = 2,
 };
 
-enum class EffectType : uint8_t {
+enum class NodeEffect : uint8_t {
+  None = 0,
+
+  Wash = 1,
+  Pulse = 2,
+  Accent = 3,
+  Flicker = 4,
+};
+
+enum class FlashPattern : uint8_t {
   Off = 0,
-  BeatPulse = 1,
-  BarBurst = 2,
+  PerBeat = 1,
+  Burst = 2,
 };
 
-struct NodeCommand {
+enum class FlashLength : uint8_t {
+  Short = 0,
+  Long = 1,
+};
+
+enum class FlashCadence : uint8_t {
+  Hz2 = 0,
+  Hz3 = 1,
+  TightenSoft = 2,
+  TightenFast = 3,
+};
+
+enum class RgbPattern : uint8_t {
+  Off = 0,
+  Breathe = 1,
+  BeatPulse = 2,
+  Accent = 3,
+  RunnerFlicker = 4,
+};
+
+struct FlashCommand {
   char name[kCommandNameLength];
-  EffectType effect;
-  uint8_t intensity;
+  FlashPattern pattern;
+  FlashLength length;
   uint8_t triggerEveryBars;
   uint8_t triggerBeat;
   uint8_t burstCount;
-  uint16_t burstIntervalMs;
-  int16_t burstIntervalStepMs;
-  uint16_t flashDurationMs;
+  FlashCadence cadence;
+  uint8_t reserved0;
 };
 
-using DefaultPreset = NodeCommand;
+struct RgbCommand {
+  char name[kCommandNameLength];
+  RgbPattern pattern;
+  uint8_t primaryR;
+  uint8_t primaryG;
+  uint8_t primaryB;
+  uint8_t secondaryR;
+  uint8_t secondaryG;
+  uint8_t secondaryB;
+  uint8_t floorLevel;
+  uint8_t baseLevel;
+  uint8_t peakLevel;
+  uint8_t triggerEveryBars;
+  uint8_t triggerBeat;
+  uint16_t cycleMs;
+  uint16_t accentDurationMs;
+};
 
 struct NodeIdentity {
   DeviceType deviceType;
   NodeKind nodeKind;
+  NodeEffect nodeEffect;
+  uint8_t reserved0;
 };
 
 }  // namespace decaflash

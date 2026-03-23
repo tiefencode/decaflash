@@ -15,8 +15,10 @@ const char* rendererNameFor(decaflash::NodeKind nodeKind) {
 
 }  // namespace
 
-void NodeOutput::setNodeKind(decaflash::NodeKind nodeKind) {
-  if (nodeKindInitialized_ && nodeKind_ == nodeKind) {
+void NodeOutput::setNodeProfile(decaflash::NodeKind nodeKind, decaflash::NodeEffect nodeEffect) {
+  const bool sameProfile =
+    nodeKindInitialized_ && nodeKind_ == nodeKind && nodeEffect_ == nodeEffect;
+  if (sameProfile) {
     return;
   }
 
@@ -25,11 +27,13 @@ void NodeOutput::setNodeKind(decaflash::NodeKind nodeKind) {
   }
 
   nodeKind_ = nodeKind;
+  nodeEffect_ = nodeEffect;
   nodeKindInitialized_ = true;
 
   switch (nodeKind_) {
     case decaflash::NodeKind::RgbStrip:
       rgbStrip_.begin();
+      rgbStrip_.setNodeEffect(nodeEffect_);
       break;
 
     case decaflash::NodeKind::Flashlight:
@@ -39,16 +43,18 @@ void NodeOutput::setNodeKind(decaflash::NodeKind nodeKind) {
   }
 }
 
-void NodeOutput::setCommand(const decaflash::NodeCommand& command) {
-  switch (nodeKind_) {
-    case decaflash::NodeKind::RgbStrip:
-      rgbStrip_.setCommand(command);
-      break;
+void NodeOutput::setFlashCommand(const decaflash::FlashCommand& command) {
+  flashlight_.setCommand(command);
+}
 
-    case decaflash::NodeKind::Flashlight:
-    default:
-      flashlight_.setCommand(command);
-      break;
+void NodeOutput::setRgbCommand(const decaflash::RgbCommand& command) {
+  rgbStrip_.setNodeEffect(nodeEffect_);
+  rgbStrip_.setCommand(command);
+}
+
+void NodeOutput::triggerRgbAccent() {
+  if (nodeKind_ == decaflash::NodeKind::RgbStrip) {
+    rgbStrip_.triggerAccent();
   }
 }
 
@@ -78,6 +84,19 @@ void NodeOutput::flash100(uint16_t flashMs) {
     case decaflash::NodeKind::Flashlight:
     default:
       flashlight_.flash100(flashMs);
+      break;
+  }
+}
+
+void NodeOutput::service(uint32_t now) {
+  switch (nodeKind_) {
+    case decaflash::NodeKind::RgbStrip:
+      rgbStrip_.service(now);
+      break;
+
+    case decaflash::NodeKind::Flashlight:
+    default:
+      flashlight_.service(now);
       break;
   }
 }

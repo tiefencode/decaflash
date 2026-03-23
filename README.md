@@ -105,7 +105,7 @@ pio device monitor -e brain --port /dev/cu.usbserial-2D52E72138
 
 Current `brain` button behavior on the ATOM Matrix:
 
-- single short tap: start the brain if idle, otherwise switch immediately to the next demo mode
+- single short tap: start the brain if idle, otherwise switch immediately to the next scene
 
 ## Brain Microphone Input
 
@@ -136,7 +136,7 @@ Current preprocessing is intentionally still small:
 
 - slow DC estimate for offset removal
 - block-based loudness and transient tracking for live analysis
-- 5x5 matrix VU meter when no mode UI is active
+- 5x5 matrix VU meter when no scene UI is active
 - prototype onset detection and BPM estimate on serial debug
 - beat indicator dot over the UI: white on every beat, red on beat 1
 - audio analysis can softly steer the live master beat clock after a stable lock
@@ -244,7 +244,7 @@ auto sync = makeClockSyncMessage(
 
 The first transport step is now wired in and split cleanly:
 
-- `brain` sends `NodeCommandMessage` on mode changes and occasional refresh
+- `brain` sends scene commands on scene changes and occasional refresh
 - `brain` sends `ClockSyncMessage` once per bar
 - `node` applies commands only when the revision changes
 - `node` keeps its local clock running, but regularly re-locks to the brain clock

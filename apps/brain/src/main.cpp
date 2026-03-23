@@ -1,24 +1,27 @@
 #include <Arduino.h>
 #include <M5Atom.h>
 
-#include "command_examples.h"
+#include "scene_programs.h"
 #include "decaflash_types.h"
 #include "espnow_transport.h"
 #include "pdm_microphone.h"
 #include "protocol.h"
 
 using decaflash::DeviceType;
-using decaflash::examples::kFlashCommandCount;
-using decaflash::examples::kFlashCommands;
-using decaflash::examples::kFlashQuadSkip;
-using decaflash::examples::kRgbCommandCount;
-using decaflash::examples::kRgbCommands;
+using decaflash::NodeEffect;
+using decaflash::scenes::flashSceneCommandFor;
+using decaflash::scenes::kFlashReference;
+using decaflash::scenes::kPulseReference;
+using decaflash::scenes::kSceneCount;
+using decaflash::scenes::rgbSceneCommandFor;
+using decaflash::scenes::sceneName;
 using decaflash::espnow_transport::ensureBroadcastPeer;
 using decaflash::espnow_transport::initEspNow;
 using decaflash::espnow_transport::isValidHeader;
 using decaflash::protocol::makeBrainHelloMessage;
 using decaflash::protocol::makeClockSyncMessage;
-using decaflash::protocol::makeNodeCommandMessage;
+using decaflash::protocol::makeFlashCommandMessage;
+using decaflash::protocol::makeRgbCommandMessage;
 using decaflash::protocol::NodeStatusMessage;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
@@ -29,7 +32,7 @@ static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
 static constexpr uint32_t METER_REFRESH_MS = 40;
 static constexpr uint32_t DEBUG_STATUS_INTERVAL_MS = 1000;
-static constexpr uint32_t UI_MODE_DISPLAY_MS = 3000;
+static constexpr uint32_t UI_SCENE_DISPLAY_MS = 3000;
 static constexpr uint16_t MIN_BPM = 60;
 static constexpr uint16_t MAX_BPM = 180;
 static constexpr uint8_t AUDIO_SYNC_CANDIDATE_CONFIDENCE = 68;
@@ -47,10 +50,19 @@ static constexpr uint8_t AUDIO_SYNC_SOFT_TRIM_DIVISOR = 3;
 static constexpr uint8_t AUDIO_SYNC_PRE_RESYNC_TRIM_DIVISOR = 2;
 static constexpr uint8_t AUDIO_SYNC_FOLLOW_REQUIRED_UPDATES = 2;
 static constexpr uint8_t AUDIO_SYNC_RESYNC_REQUIRED_HITS = 2;
-static constexpr size_t kModeCount = kFlashCommandCount;
+static constexpr size_t kSceneSlots = kSceneCount;
 static constexpr size_t kTrackedNodeCapacity = 8;
 static constexpr size_t kPendingNodeStatusCapacity = 6;
-static_assert(kFlashCommandCount == kRgbCommandCount, "brain mode tables must stay aligned");
+static constexpr NodeEffect kFlashEffects[] = {
+  NodeEffect::Pulse,
+  NodeEffect::Accent,
+};
+static constexpr NodeEffect kRgbEffects[] = {
+  NodeEffect::Wash,
+  NodeEffect::Pulse,
+  NodeEffect::Accent,
+  NodeEffect::Flicker,
+};
 uint32_t nextSendAtMs = 0;
 bool espNowReady = false;
 bool brainLive = false;
@@ -69,7 +81,7 @@ uint32_t beatDotUntilMs = 0;
 uint8_t beatDotBeat = 0;
 uint32_t beatDotColorOverride = 0;
 bool syncBeatDotPending = false;
-size_t currentModeIndex = 0;
+size_t currentSceneIndex = 0;
 uint32_t lastMeterDrawAtMs = 0;
 bool audioClockLocked = false;
 uint8_t audioSyncCandidateCount = 0;
@@ -146,6 +158,26 @@ const char* nodeKindName(decaflash::NodeKind nodeKind) {
   }
 }
 
+const char* nodeRoleName(decaflash::NodeEffect nodeEffect) {
+  switch (nodeEffect) {
+    case decaflash::NodeEffect::Wash:
+      return "wash";
+
+    case decaflash::NodeEffect::Pulse:
+      return "pulse";
+
+    case decaflash::NodeEffect::Accent:
+      return "accent";
+
+    case decaflash::NodeEffect::Flicker:
+      return "flicker";
+
+    case decaflash::NodeEffect::None:
+    default:
+      return "none";
+  }
+}
+
 void formatMac(const uint8_t* mac, char* buffer, size_t bufferLength) {
   snprintf(buffer,
            bufferLength,
@@ -199,10 +231,11 @@ void printTrackedNode(const TrackedNode& node, const char* eventLabel) {
   char macBuffer[18] = {};
   formatMac(node.mac, macBuffer, sizeof(macBuffer));
 
-  Serial.printf("node=%s mac=%s kind=%s bpm=%u program=",
+  Serial.printf("node=%s mac=%s kind=%s role=%s bpm=%u scene=",
                 eventLabel,
                 macBuffer,
                 nodeKindName(node.status.identity.nodeKind),
+                nodeRoleName(node.status.identity.nodeEffect),
                 static_cast<unsigned>(node.status.currentBpm));
   if (node.status.currentProgramIndex == 255) {
     Serial.print("remote");
@@ -257,6 +290,7 @@ void processPendingNodeStatuses(uint32_t now) {
       !wasActive ||
       memcmp(slot->mac, event.mac, sizeof(slot->mac)) != 0 ||
       slot->status.identity.nodeKind != event.status.identity.nodeKind ||
+      slot->status.identity.nodeEffect != event.status.identity.nodeEffect ||
       slot->status.currentBpm != event.status.currentBpm ||
       slot->status.beatsPerBar != event.status.beatsPerBar ||
       slot->status.currentProgramIndex != event.status.currentProgramIndex;
@@ -507,10 +541,10 @@ void clearMatrix() {
   }
 }
 
-void drawModeNumber(size_t modeIndex) {
+void drawSceneNumber(size_t sceneIndex) {
   clearMatrix();
 
-  const uint8_t* rows = kDigitMasks[modeIndex];
+  const uint8_t* rows = kDigitMasks[sceneIndex];
   for (uint8_t y = 0; y < 5; ++y) {
     for (uint8_t x = 0; x < 5; ++x) {
       const bool on = (rows[y] >> (4 - x)) & 0x01;
@@ -519,12 +553,12 @@ void drawModeNumber(size_t modeIndex) {
   }
 }
 
-uint32_t modePixelColor(size_t modeIndex, uint8_t x, uint8_t y) {
-  if (modeIndex >= kModeCount || x > 4 || y > 4) {
+uint32_t scenePixelColor(size_t sceneIndex, uint8_t x, uint8_t y) {
+  if (sceneIndex >= kSceneSlots || x > 4 || y > 4) {
     return 0x000000;
   }
 
-  const uint8_t* rows = kDigitMasks[modeIndex];
+  const uint8_t* rows = kDigitMasks[sceneIndex];
   const bool on = (rows[y] >> (4 - x)) & 0x01;
   return on ? color(255, 255, 255) : 0x000000;
 }
@@ -541,7 +575,7 @@ void drawBeatDotOverlay() {
   M5.dis.drawpix(4, beatDotColor());
 }
 
-bool isModeUiActive(uint32_t now) {
+bool isSceneUiActive(uint32_t now) {
   return uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) < 0;
 }
 
@@ -551,8 +585,8 @@ void updateBeatDotOverlay(uint32_t now) {
     return;
   }
 
-  if (isModeUiActive(now)) {
-    M5.dis.drawpix(4, modePixelColor(currentModeIndex, 4, 0));
+  if (isSceneUiActive(now)) {
+    M5.dis.drawpix(4, scenePixelColor(currentSceneIndex, 4, 0));
   }
 }
 
@@ -586,7 +620,7 @@ void drawMicrophoneMeter(uint8_t filledPixels) {
 }
 
 void updateIdleMatrixUi(uint32_t now) {
-  if (isModeUiActive(now) || matrixOffAtMs != 0) {
+  if (isSceneUiActive(now) || matrixOffAtMs != 0) {
     return;
   }
 
@@ -654,13 +688,14 @@ void onBeat() {
   }
 }
 
-void sendCommand(decaflash::NodeKind targetNodeKind, const decaflash::NodeCommand& command) {
+void sendFlashCommand(NodeEffect targetNodeEffect, const decaflash::FlashCommand& command) {
   if (!espNowReady || !brainLive) {
     return;
   }
 
-  const auto message = makeNodeCommandMessage(
-    targetNodeKind,
+  const auto message = makeFlashCommandMessage(
+    decaflash::NodeKind::Flashlight,
+    targetNodeEffect,
     command,
     commandRevision
   );
@@ -671,16 +706,48 @@ void sendCommand(decaflash::NodeKind targetNodeKind, const decaflash::NodeComman
     sizeof(message)
   );
 
-  Serial.printf("send=node_command result=%d target=%u mode=%u command=%s\n",
+  Serial.printf("send=flash_command result=%d role=%s scene=%u name=%s command=%s\n",
                 result,
-                static_cast<unsigned>(targetNodeKind),
-                static_cast<unsigned>(currentModeIndex + 1),
+                nodeRoleName(targetNodeEffect),
+                static_cast<unsigned>(currentSceneIndex + 1),
+                sceneName(currentSceneIndex),
+                message.command.name);
+}
+
+void sendRgbCommand(NodeEffect targetNodeEffect, const decaflash::RgbCommand& command) {
+  if (!espNowReady || !brainLive) {
+    return;
+  }
+
+  const auto message = makeRgbCommandMessage(
+    decaflash::NodeKind::RgbStrip,
+    targetNodeEffect,
+    command,
+    commandRevision
+  );
+
+  const auto result = esp_now_send(
+    decaflash::espnow_transport::kBroadcastMac,
+    reinterpret_cast<const uint8_t*>(&message),
+    sizeof(message)
+  );
+
+  Serial.printf("send=rgb_command result=%d role=%s scene=%u name=%s command=%s\n",
+                result,
+                nodeRoleName(targetNodeEffect),
+                static_cast<unsigned>(currentSceneIndex + 1),
+                sceneName(currentSceneIndex),
                 message.command.name);
 }
 
 void sendCurrentCommands() {
-  sendCommand(decaflash::NodeKind::Flashlight, kFlashCommands[currentModeIndex]);
-  sendCommand(decaflash::NodeKind::RgbStrip, kRgbCommands[currentModeIndex]);
+  for (const auto effect : kFlashEffects) {
+    sendFlashCommand(effect, flashSceneCommandFor(effect, currentSceneIndex));
+  }
+
+  for (const auto effect : kRgbEffects) {
+    sendRgbCommand(effect, rgbSceneCommandFor(effect, currentSceneIndex));
+  }
 }
 
 void sendBrainHello() {
@@ -698,17 +765,19 @@ void sendBrainHello() {
   Serial.printf("send=brain_hello result=%d\n", result);
 }
 
-void showModeUi() {
-  drawModeNumber(currentModeIndex);
-  uiFeedbackUntilMs = millis() + UI_MODE_DISPLAY_MS;
+void showSceneUi() {
+  drawSceneNumber(currentSceneIndex);
+  uiFeedbackUntilMs = millis() + UI_SCENE_DISPLAY_MS;
   matrixOffAtMs = 0;
-  Serial.printf("mode=%u\n", static_cast<unsigned>(currentModeIndex + 1));
+  Serial.printf("scene=%u name=%s\n",
+                static_cast<unsigned>(currentSceneIndex + 1),
+                sceneName(currentSceneIndex));
 }
 
-void selectNextMode() {
-  currentModeIndex = (currentModeIndex + 1) % kModeCount;
+void selectNextScene() {
+  currentSceneIndex = (currentSceneIndex + 1) % kSceneSlots;
   commandRevision++;
-  showModeUi();
+  showSceneUi();
   sendCurrentCommands();
 }
 
@@ -721,7 +790,7 @@ void activateBrain() {
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
   commandRevision++;
-  showModeUi();
+  showSceneUi();
   sendCurrentCommands();
   nextSendAtMs = millis() + COMMAND_REFRESH_MS;
   Serial.println("brain=live");
@@ -736,9 +805,15 @@ void setup() {
   Serial.println();
   Serial.println("Decaflash Brain V1");
   Serial.printf("device_type=%u\n", static_cast<unsigned>(DEVICE_TYPE));
-  const auto message = makeNodeCommandMessage(decaflash::NodeKind::Flashlight, kFlashQuadSkip, 1);
+  const auto message = makeFlashCommandMessage(
+    decaflash::NodeKind::Flashlight,
+    NodeEffect::Pulse,
+    kFlashReference,
+    1
+  );
   Serial.printf("protocol=dcfl/v%u\n", message.header.version);
   Serial.printf("example_command=%s\n", message.command.name);
+  Serial.printf("example_rgb=%s\n", kPulseReference.name);
   microphone.begin();
 
   const auto initResult = initEspNow();
@@ -752,8 +827,8 @@ void setup() {
   Serial.printf("esp_now=%s\n", initResult.ok() ? "ok" : "failed");
   Serial.printf("peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
   Serial.printf("add_peer=%d\n", static_cast<int>(peerResult.addPeer));
-  Serial.printf("mode=%s\n", espNowReady ? "silent start" : "startup only");
-  Serial.println("button=press start/next mode");
+  Serial.printf("startup=%s\n", espNowReady ? "silent start" : "startup only");
+  Serial.println("button=press start/next scene");
   Serial.println("node_discovery=esp-now node status receive");
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
@@ -775,7 +850,7 @@ void loop() {
 
   if (M5.Btn.wasPressed()) {
     if (brainLive) {
-      selectNextMode();
+      selectNextScene();
     } else {
       activateBrain();
     }
