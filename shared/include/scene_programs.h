@@ -85,15 +85,14 @@ inline RgbCommand rgbCommand(
 inline SceneDefinition makeScene1() {
   constexpr RgbColor kDeepBlue = {0, 24, 110};
   constexpr RgbColor kIceBlue = {92, 214, 255};
-  constexpr RgbColor kAccentBlue = {18, 120, 255};
   constexpr RgbColor kPulseBlue = {0, 78, 255};
   constexpr RgbColor kHeartDarkRed = {84, 0, 6};
   constexpr RgbColor kHeartRed = {255, 18, 0};
   constexpr uint8_t kWashFloor = 0;
   constexpr uint8_t kWashBase = 18;
-  constexpr uint8_t kWashPeak = 170;
-  constexpr uint16_t kWashTravelMs = 420;
-  constexpr uint16_t kWashWhiteHoldMs = 120;
+  constexpr uint8_t kWashPeak = 152;
+  constexpr uint16_t kWashTravelMs = 300;
+  constexpr uint16_t kWashWhiteHoldMs = 70;
 
   // Szene 1 startet mit einer langsamen 4-Takte-Welle:
   // dunkel -> blau -> hellblau -> kurzes weiss -> wieder aus.
@@ -139,7 +138,7 @@ inline SceneDefinition makeScene1() {
       0,
       14,
       176,
-      2,
+      1,
       1,
       0,
       0
@@ -149,13 +148,13 @@ inline SceneDefinition makeScene1() {
       "Scene 1 Flicker",
       RgbPattern::RunnerFlicker,
       kDeepBlue,
-      kAccentBlue,
-      2,
-      18,
-      96,
-      2,
-      2,
-      1400,
+      kPulseBlue,
+      0,
+      132,
+      132,
+      1,
+      1,
+      0,
       140
     ),
   };

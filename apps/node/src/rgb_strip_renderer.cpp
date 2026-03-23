@@ -129,13 +129,13 @@ uint8_t pulseWindow8(uint8_t phase, uint8_t start, uint8_t peak, uint8_t end, ui
 }
 
 uint8_t heartbeatEnvelope8(uint8_t phase) {
-  const uint8_t firstHit = pulseWindow8(phase, 18U, 34U, 58U, 255U);
-  const uint8_t secondHit = pulseWindow8(phase, 70U, 84U, 114U, 176U);
+  const uint8_t firstHit = pulseWindow8(phase, 8U, 22U, 42U, 255U);
+  const uint8_t secondHit = pulseWindow8(phase, 46U, 60U, 88U, 180U);
   uint8_t tail = 0U;
-  if (phase >= 84U) {
+  if (phase >= 60U) {
     tail = scale8(
-      static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 84U, 255U))),
-      92U
+      static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 60U, 255U))),
+      88U
     );
   }
 
@@ -168,7 +168,7 @@ WavePixelState baseBarWaveState(
 ) {
   const CRGB deepBlue = primaryColor(command);
   const CRGB lightBlue = secondaryColor(command);
-  const CRGB white = CRGB(190, 220, 255);
+  const CRGB white = CRGB(148, 182, 232);
   const uint8_t preWhiteLevel = mixLevel(command.baseLevel, command.peakLevel, 196U);
   WavePixelState state = {};
 
@@ -444,20 +444,17 @@ void RgbStripRenderer::renderBeatPulse(uint32_t now) {
 }
 
 void RgbStripRenderer::renderAccent(uint32_t now) {
-  const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
-  const uint8_t phraseBars = (currentCommand_.triggerEveryBars == 0) ? 2U : currentCommand_.triggerEveryBars;
   const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
-  const uint32_t phraseDurationMs =
-    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar) * beatIntervalMs;
+  const uint32_t phraseBeats = 4U;
   const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
   const uint8_t startBeat =
-    (currentCommand_.triggerBeat == 0 || currentCommand_.triggerBeat > safeBeatsPerBar)
+    (currentCommand_.triggerBeat == 0 || currentCommand_.triggerBeat > phraseBeats)
       ? 1U
       : currentCommand_.triggerBeat;
-  const uint32_t totalPhraseBeats =
-    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar);
+  const uint32_t phraseDurationMs = phraseBeats * beatIntervalMs;
+  const uint32_t totalPhraseBeats = phraseBeats;
   const uint32_t absoluteBeatIndex =
-    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
+    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(beatsPerBar_ == 0 ? 4U : beatsPerBar_) +
     static_cast<uint32_t>(safeBeatInBar - 1U);
   const uint32_t phraseBeatIndex =
     (absoluteBeatIndex + totalPhraseBeats - static_cast<uint32_t>(startBeat - 1U)) % totalPhraseBeats;
@@ -491,61 +488,20 @@ void RgbStripRenderer::renderAccent(uint32_t now) {
 }
 
 void RgbStripRenderer::renderRunnerFlicker(uint32_t now) {
-  const uint32_t elapsedMs = now - effectStartedAtMs_;
-  const uint16_t cycleMs = (currentCommand_.cycleMs == 0) ? 900 : currentCommand_.cycleMs;
-  const uint16_t bounceCycleMs = static_cast<uint16_t>(cycleMs * 2U);
-  const uint8_t motionNoise = segmentNoise8(elapsedMs, static_cast<uint16_t>(cycleMs * 4U), 61U);
-  const uint8_t bouncePhase = static_cast<uint8_t>(
-    (elapsedMs * 255UL) / bounceCycleMs
-  );
-  uint8_t runner = static_cast<uint8_t>(
-    (wave8FromProgress(bouncePhase) * (kLedCount - 1U)) / 255U
-  );
-  if ((motionNoise & 0x80U) != 0U) {
-    runner = static_cast<uint8_t>((kLedCount - 1U) - runner);
-  }
-  const uint8_t accentBoost = accentLevel(now, 0, currentCommand_.peakLevel);
-  const uint8_t colorPhase = static_cast<uint8_t>(
-    (elapsedMs * 255UL) / static_cast<uint16_t>(cycleMs * 4U)
-  );
-  const uint8_t stripeStride = static_cast<uint8_t>(3U + (motionNoise % 3U));
-  const uint8_t stripePhase = static_cast<uint8_t>(motionNoise / 40U);
-  const uint8_t sparkleThreshold = static_cast<uint8_t>(184U + motionNoise / 4U);
+  (void)now;
+  const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
+  const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
+  const uint32_t absoluteBeatIndex =
+    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
+    static_cast<uint32_t>(safeBeatInBar - 1U);
+  const bool swapPattern = (absoluteBeatIndex & 1U) != 0U;
   const CRGB primary = primaryColor(currentCommand_);
   const CRGB secondary = secondaryColor(currentCommand_);
+  const uint8_t level = currentCommand_.baseLevel;
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
-    const uint8_t distance = (runner > i) ? (runner - i) : (i - runner);
-    const uint8_t runnerLevel = (distance == 0) ? currentCommand_.peakLevel :
-                                (distance == 1) ? currentCommand_.baseLevel :
-                                currentCommand_.floorLevel;
-    uint16_t flickerLevel = currentCommand_.floorLevel + pseudoFlicker(now, i);
-    if (flickerLevel > currentCommand_.baseLevel) {
-      flickerLevel = currentCommand_.baseLevel;
-    }
-
-    const uint8_t sparkleSeed = hash8((elapsedMs / 85U) + static_cast<uint32_t>(i * 29U) + motionNoise);
-    const bool sparkle = sparkleSeed > sparkleThreshold;
-    const bool useAccentColor =
-      sparkle ||
-      ((i + stripePhase + (wave8FromProgress(colorPhase) / 64U) + (now / 110U)) % stripeStride) == 0U;
-    const uint8_t finalLevel = clampLevel(
-      runnerLevel + static_cast<uint8_t>(accentBoost / 3U)
-    );
-    const CRGB movingPrimary = blend(
-      primary,
-      secondary,
-      static_cast<uint8_t>(scale8(colorPhase, static_cast<uint8_t>(90U + motionNoise / 2U)))
-    );
-    const CRGB primary = scaleColor(
-      movingPrimary,
-      finalLevel
-    );
-    const CRGB secondary = scaleColor(
-      CRGB(currentCommand_.secondaryR, currentCommand_.secondaryG, currentCommand_.secondaryB),
-      clampLevel(flickerLevel + accentBoost)
-    );
-    gStripLeds[i] = useAccentColor ? secondary : primary;
+    const bool usePrimary = ((i + (swapPattern ? 1U : 0U)) % 2U) == 0U;
+    gStripLeds[i] = scaleColor(usePrimary ? primary : secondary, level);
   }
 }
 
