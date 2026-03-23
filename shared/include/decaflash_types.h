@@ -74,7 +74,7 @@ struct NodeIdentity {
   DeviceType deviceType;
   NodeKind nodeKind;
   NodeEffect nodeEffect;
-  uint8_t reserved0;
+  uint8_t profileRevision;
 };
 
 }  // namespace decaflash

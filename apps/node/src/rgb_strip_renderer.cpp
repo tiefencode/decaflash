@@ -93,6 +93,55 @@ uint8_t mixLevel(uint8_t from, uint8_t to, uint8_t mix) {
   return static_cast<uint8_t>(value);
 }
 
+uint8_t classicPulseEnvelope8(uint8_t phase) {
+  if (phase < 78U) {
+    return ease8InOutCubic(segmentMix8(phase, 0U, 78U));
+  }
+
+  if (phase < 112U) {
+    return 255U;
+  }
+
+  return static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 112U, 255U)));
+}
+
+uint8_t pulseCrestMix8(uint8_t phase) {
+  if (phase < 62U || phase > 146U) {
+    return 0U;
+  }
+
+  return scale8(wave8FromProgress(segmentMix8(phase, 62U, 146U)), 132U);
+}
+
+uint8_t pulseWindow8(uint8_t phase, uint8_t start, uint8_t peak, uint8_t end, uint8_t strength) {
+  if (phase <= start || phase >= end) {
+    return 0U;
+  }
+
+  if (phase < peak) {
+    return scale8(ease8InOutCubic(segmentMix8(phase, start, peak)), strength);
+  }
+
+  return scale8(
+    static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, peak, end))),
+    strength
+  );
+}
+
+uint8_t heartbeatEnvelope8(uint8_t phase) {
+  const uint8_t firstHit = pulseWindow8(phase, 18U, 34U, 58U, 255U);
+  const uint8_t secondHit = pulseWindow8(phase, 70U, 84U, 114U, 176U);
+  uint8_t tail = 0U;
+  if (phase >= 84U) {
+    tail = scale8(
+      static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 84U, 255U))),
+      92U
+    );
+  }
+
+  return max(firstHit, max(secondHit, tail));
+}
+
 WavePhaseLayout barWaveLayout(const decaflash::RgbCommand& command, uint32_t phraseDurationMs) {
   const uint8_t deepBlueEnd = 96U;
   const uint8_t lightBlueEnd = 206U;
@@ -350,86 +399,94 @@ void RgbStripRenderer::renderBarWave(uint32_t now) {
 }
 
 void RgbStripRenderer::renderBeatPulse(uint32_t now) {
-  const uint32_t elapsedMs = now - effectStartedAtMs_;
-  const uint16_t macroCycleMs =
-    (currentCommand_.cycleMs == 0) ? 2200U : static_cast<uint16_t>(currentCommand_.cycleMs * 3U);
-  const uint8_t macroPhase = static_cast<uint8_t>(
-    (elapsedMs * 255UL) / macroCycleMs
+  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
+  uint32_t pulseDurationMs = (currentCommand_.cycleMs == 0) ? beatIntervalMs : currentCommand_.cycleMs;
+  if (pulseDurationMs > beatIntervalMs) {
+    pulseDurationMs = beatIntervalMs;
+  }
+  if (pulseDurationMs == 0) {
+    pulseDurationMs = beatIntervalMs;
+  }
+
+  uint32_t elapsedMs = now - beatStartedAtMs_;
+  if (elapsedMs > pulseDurationMs) {
+    elapsedMs = pulseDurationMs;
+  }
+
+  const uint8_t phase = static_cast<uint8_t>((elapsedMs * 255UL) / pulseDurationMs);
+  const uint8_t envelope = classicPulseEnvelope8(phase);
+  const uint8_t colorMix = ease8InOutCubic(envelope);
+  const uint8_t crestMix = pulseCrestMix8(phase);
+  const uint8_t bodyLevel = mixLevel(
+    currentCommand_.floorLevel,
+    currentCommand_.baseLevel,
+    envelope
   );
-  const uint8_t macroNoise = segmentNoise8(elapsedMs, static_cast<uint16_t>(macroCycleMs * 2U), 29U);
-  const uint8_t trailPhase = static_cast<uint8_t>(
-    (elapsedMs * 255UL) / static_cast<uint32_t>(macroCycleMs * 2UL)
+  const uint8_t finalLevel = mixLevel(
+    bodyLevel,
+    currentCommand_.peakLevel,
+    crestMix
   );
-  const uint8_t baseLevel =
-    breatheLevel(now, currentCommand_.floorLevel, currentCommand_.baseLevel);
-  const uint8_t overlayLevel =
-    accentLevel(now, baseLevel, currentCommand_.peakLevel);
-  const CRGB baseBlend = blend(
+  const CRGB bodyColor = blend(
     primaryColor(currentCommand_),
     secondaryColor(currentCommand_),
-    static_cast<uint8_t>(scale8(ease8InOutCubic(macroPhase), static_cast<uint8_t>(80U + macroNoise / 3U)))
+    colorMix
   );
-  const CRGB accentTint = blend(
+  const CRGB pulseColor = blend(
+    bodyColor,
     secondaryColor(currentCommand_),
-    primaryColor(currentCommand_),
-    static_cast<uint8_t>(macroNoise / 2U)
+    static_cast<uint8_t>(crestMix / 2U)
   );
-  const CRGB accentColor = scaleColor(
-    accentTint,
-    overlayLevel
-  );
-  const uint8_t bandCenter = static_cast<uint8_t>(
-    (wave8FromProgress(static_cast<uint8_t>(macroPhase + macroNoise / 3U)) * (kLedCount - 1U)) / 255U
-  );
-  const uint8_t bandHalfWidth = static_cast<uint8_t>(1U + (wave8FromProgress(static_cast<uint8_t>(macroPhase + macroNoise)) / 72U));
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
-    const uint8_t distance = (i > bandCenter) ? (i - bandCenter) : (bandCenter - i);
-    const uint8_t laneMix = scale8(
-      wave8FromProgress(static_cast<uint8_t>(trailPhase + i * 17U)),
-      static_cast<uint8_t>(36U + macroNoise / 5U)
-    );
-    const CRGB laneBase = blend(baseBlend, accentTint, laneMix);
-    const CRGB baseColor = scaleColor(laneBase, baseLevel);
-    gStripLeds[i] = baseColor;
-    if (distance <= bandHalfWidth) {
-      const uint8_t overlayMix = static_cast<uint8_t>(210U - distance * 46U);
-      gStripLeds[i] = blend(baseColor, accentColor, overlayMix);
-    } else if (((i + macroNoise / 48U) % 5U) == 0U && overlayLevel > baseLevel) {
-      gStripLeds[i] = blend(baseColor, accentColor, 58U);
-    }
+    gStripLeds[i] = scaleColor(pulseColor, finalLevel);
   }
 }
 
 void RgbStripRenderer::renderAccent(uint32_t now) {
-  const uint32_t elapsedMs = now - effectStartedAtMs_;
-  const uint16_t rotateCycleMs =
-    (currentCommand_.cycleMs == 0) ? 2400U : currentCommand_.cycleMs;
-  const uint8_t rotation = static_cast<uint8_t>((elapsedMs / (rotateCycleMs / 3U + 1U)) % 5U);
-  const uint8_t macroNoise = segmentNoise8(elapsedMs, static_cast<uint16_t>(rotateCycleMs * 2U), 43U);
-  const bool dormantWindow = macroNoise < 72U;
-  const uint8_t stripeWidth = (macroNoise > 180U) ? 2U : 1U;
-  const uint8_t baseLevel = dormantWindow ? static_cast<uint8_t>(currentCommand_.floorLevel / 2U)
-                                          : currentCommand_.floorLevel;
-  const uint8_t overlayLevel =
-    accentLevel(now, currentCommand_.baseLevel, currentCommand_.peakLevel);
-  const CRGB baseColor = scaleColor(
-    primaryColor(currentCommand_),
-    baseLevel
+  const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
+  const uint8_t phraseBars = (currentCommand_.triggerEveryBars == 0) ? 2U : currentCommand_.triggerEveryBars;
+  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
+  const uint32_t phraseDurationMs =
+    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar) * beatIntervalMs;
+  const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
+  const uint8_t startBeat =
+    (currentCommand_.triggerBeat == 0 || currentCommand_.triggerBeat > safeBeatsPerBar)
+      ? 1U
+      : currentCommand_.triggerBeat;
+  const uint32_t totalPhraseBeats =
+    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar);
+  const uint32_t absoluteBeatIndex =
+    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
+    static_cast<uint32_t>(safeBeatInBar - 1U);
+  const uint32_t phraseBeatIndex =
+    (absoluteBeatIndex + totalPhraseBeats - static_cast<uint32_t>(startBeat - 1U)) % totalPhraseBeats;
+  uint32_t elapsedBeatMs = now - beatStartedAtMs_;
+  if (elapsedBeatMs > beatIntervalMs) {
+    elapsedBeatMs = beatIntervalMs;
+  }
+
+  uint32_t elapsedPhraseMs = phraseBeatIndex * beatIntervalMs + elapsedBeatMs;
+  if (elapsedPhraseMs > phraseDurationMs) {
+    elapsedPhraseMs = phraseDurationMs;
+  }
+
+  const uint8_t phase = static_cast<uint8_t>((elapsedPhraseMs * 255UL) / phraseDurationMs);
+  const uint8_t envelope = heartbeatEnvelope8(phase);
+  const uint8_t level = mixLevel(
+    currentCommand_.floorLevel,
+    currentCommand_.peakLevel,
+    envelope
   );
-  const CRGB accentColor = scaleColor(
+  const uint8_t colorMix = scale8(envelope, 120U);
+  const CRGB pulseColor = blend(
+    primaryColor(currentCommand_),
     secondaryColor(currentCommand_),
-    overlayLevel
+    colorMix
   );
 
-  fill_solid(gStripLeds, kLedCount, dormantWindow ? CRGB::Black : baseColor);
   for (uint8_t i = 0; i < kLedCount; ++i) {
-    const uint8_t lane = static_cast<uint8_t>((i + rotation) % 5U);
-    if (lane < stripeWidth) {
-      gStripLeds[i] = accentColor;
-    } else if (!dormantWindow && ((i + macroNoise / 32U) % 7U) == 0U) {
-      gStripLeds[i] = baseColor;
-    }
+    gStripLeds[i] = scaleColor(pulseColor, level);
   }
 }
 
@@ -490,19 +547,6 @@ void RgbStripRenderer::renderRunnerFlicker(uint32_t now) {
     );
     gStripLeds[i] = useAccentColor ? secondary : primary;
   }
-}
-
-uint8_t RgbStripRenderer::breatheLevel(uint32_t now, uint8_t low, uint8_t high) const {
-  if (high <= low) {
-    return low;
-  }
-
-  const uint16_t cycleMs = (currentCommand_.cycleMs == 0) ? 1800 : currentCommand_.cycleMs;
-  const uint8_t wave = ease8InOutCubic(static_cast<uint8_t>(
-    ((now - effectStartedAtMs_) * 255UL) / cycleMs
-  ));
-  const uint8_t span = high - low;
-  return low + scale8(span, wave);
 }
 
 uint8_t RgbStripRenderer::accentLevel(uint32_t now, uint8_t low, uint8_t high) const {

@@ -24,7 +24,7 @@ void NodeOutput::setNodeProfile(decaflash::NodeKind nodeKind, decaflash::NodeEff
     return;
   }
 
-  if (nodeKindInitialized_) {
+  if (nodeKindInitialized_ && nodeKind_ != nodeKind) {
     allOff();
   }
 

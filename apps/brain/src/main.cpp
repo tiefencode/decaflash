@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <M5Atom.h>
 
+#include <esp_system.h>
+
 #include "scene_programs.h"
 #include "decaflash_types.h"
 #include "espnow_transport.h"
@@ -71,6 +73,7 @@ bool espNowReady = false;
 bool brainLive = false;
 uint32_t commandRevision = 1;
 uint32_t clockRevision = 1;
+uint32_t brainSessionId = 1;
 uint32_t helloRevision = 1;
 uint32_t beatSerial = 0;
 uint16_t currentBpm = DEFAULT_BPM;
@@ -274,7 +277,8 @@ void processPendingNodeStatuses(uint32_t now) {
       !wasActive ||
       memcmp(slot->mac, event.mac, sizeof(slot->mac)) != 0 ||
       slot->status.identity.nodeKind != event.status.identity.nodeKind ||
-      slot->status.identity.nodeEffect != event.status.identity.nodeEffect;
+      slot->status.identity.nodeEffect != event.status.identity.nodeEffect ||
+      slot->status.identity.profileRevision != event.status.identity.profileRevision;
 
     slot->active = true;
     memcpy(slot->mac, event.mac, sizeof(slot->mac));
@@ -678,7 +682,7 @@ void sendBrainHello() {
     return;
   }
 
-  const auto message = makeBrainHelloMessage(helloRevision);
+  const auto message = makeBrainHelloMessage(brainSessionId, helloRevision++);
   const auto result = esp_now_send(
     decaflash::espnow_transport::kBroadcastMac,
     reinterpret_cast<const uint8_t*>(&message),
@@ -763,6 +767,11 @@ void setup() {
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
   decaflash::brain::matrix::clearMatrix();
+  brainSessionId = esp_random();
+  if (brainSessionId == 0) {
+    brainSessionId = 1;
+  }
+  helloRevision = 1;
 
   if (espNowReady) {
     esp_now_register_recv_cb(onEspNowReceive);

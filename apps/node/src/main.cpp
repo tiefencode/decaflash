@@ -14,7 +14,6 @@ using decaflash::DeviceType;
 using decaflash::FlashCommand;
 using decaflash::FlashLength;
 using decaflash::FlashPattern;
-using decaflash::NodeEffect;
 using decaflash::NodeIdentity;
 using decaflash::NodeKind;
 using decaflash::RgbCommand;
@@ -32,6 +31,8 @@ using decaflash::node::kSceneCount;
 using decaflash::node::rgbSceneCommandFor;
 using decaflash::node::sceneName;
 
+using NodeRole = decaflash::NodeEffect;
+
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Node;
 static constexpr NodeKind DEFAULT_NODE_KIND = NodeKind::RgbStrip;
 static constexpr char kConfigNamespace[] = "decaflash";
@@ -43,15 +44,10 @@ static constexpr int BUTTON_PIN = 39;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
 static constexpr uint32_t STARTUP_DELAY_MS = 500;
-static constexpr uint32_t CLOCK_SYNC_TIMEOUT_MS = 4000;
-static constexpr uint32_t BRAIN_HELLO_DEDUP_MS = 1500;
 static constexpr uint8_t BRAIN_CONNECT_FLASH_COUNT = 3;
 static constexpr uint32_t BRAIN_CONNECT_FLASH_INTERVAL_MS = 1000;
 static constexpr uint16_t BRAIN_CONNECT_FLASH_DURATION_MS = 260;
-static constexpr uint32_t SOFT_SYNC_MATCH_WINDOW_MS = 120;
 static constexpr uint32_t DUPLICATE_BEAT_GUARD_MS = 250;
-static constexpr int32_t SOFT_SYNC_MAX_CORRECTION_MS = 30;
-static constexpr int32_t HARD_SYNC_ERROR_MS = 180;
 static constexpr uint16_t BPM = 120;
 static constexpr uint8_t DEFAULT_BEATS_PER_BAR = 4;
 
@@ -84,8 +80,8 @@ static constexpr RgbCommand REMOTE_IDLE_RGB_COMMAND = {
 NodeIdentity nodeIdentity = {
   DEVICE_TYPE,
   DEFAULT_NODE_KIND,
-  NodeEffect::Pulse,
-  0,
+  NodeRole::Pulse,
+  1,
 };
 
 NodeOutput renderer;
@@ -111,17 +107,19 @@ uint32_t beatIntervalMs = 0;
 uint32_t currentBar = 1;
 uint8_t beatInBar = 1;
 uint8_t beatsPerBar = DEFAULT_BEATS_PER_BAR;
-bool brainConnected = false;
-bool remoteControlActive = false;
-bool awaitingRemoteClock = false;
+
+enum class RunMode : uint8_t {
+  Demo = 0,
+  BrainWaiting = 1,
+  BrainRunning = 2,
+};
+
+RunMode runMode = RunMode::Demo;
 uint32_t lastRemoteCommandRevision = 0;
 uint32_t lastClockRevision = 0;
 uint32_t lastClockBeatSerial = 0;
-uint32_t lastClockSyncAtMs = 0;
-uint32_t lastBrainActivityAtMs = 0;
-uint32_t lastBrainHelloHandledAtMs = 0;
-bool clockLocked = false;
-bool brainConnectSequenceShown = false;
+uint32_t lastBrainSessionId = 0;
+uint32_t lastBrainHelloRevision = 0;
 uint32_t lastBeatRenderedAtMs = 0;
 uint8_t lastRenderedBeatInBar = 0;
 uint32_t lastRenderedBar = 0;
@@ -138,60 +136,60 @@ BrainHelloMessage pendingBrainHelloMessage = {};
 
 void onBeat();
 
-NodeEffect defaultEffectFor(NodeKind nodeKind) {
+NodeRole defaultRoleFor(NodeKind nodeKind) {
   switch (nodeKind) {
     case NodeKind::RgbStrip:
-      return NodeEffect::Pulse;
+      return NodeRole::Pulse;
 
     case NodeKind::Flashlight:
     default:
-      return NodeEffect::Pulse;
+      return NodeRole::Pulse;
   }
 }
 
-bool effectCompatible(NodeKind nodeKind, NodeEffect nodeEffect) {
-  if (nodeEffect == NodeEffect::None) {
+bool roleCompatible(NodeKind nodeKind, NodeRole nodeRole) {
+  if (nodeRole == NodeRole::None) {
     return false;
   }
 
   switch (nodeKind) {
     case NodeKind::RgbStrip:
-      return nodeEffect == NodeEffect::Wash ||
-             nodeEffect == NodeEffect::Pulse ||
-             nodeEffect == NodeEffect::Accent ||
-             nodeEffect == NodeEffect::Flicker;
+      return nodeRole == NodeRole::Wash ||
+             nodeRole == NodeRole::Pulse ||
+             nodeRole == NodeRole::Accent ||
+             nodeRole == NodeRole::Flicker;
 
     case NodeKind::Flashlight:
-      return nodeEffect == NodeEffect::Pulse ||
-             nodeEffect == NodeEffect::Accent;
+      return nodeRole == NodeRole::Pulse ||
+             nodeRole == NodeRole::Accent;
 
     default:
       return false;
   }
 }
 
-NodeEffect nextNodeEffect(NodeKind nodeKind, NodeEffect currentEffect) {
+NodeRole nextNodeRole(NodeKind nodeKind, NodeRole currentRole) {
   switch (nodeKind) {
     case NodeKind::RgbStrip:
-      switch (currentEffect) {
-        case NodeEffect::Wash:
-          return NodeEffect::Pulse;
+      switch (currentRole) {
+        case NodeRole::Wash:
+          return NodeRole::Pulse;
 
-        case NodeEffect::Pulse:
-          return NodeEffect::Accent;
+        case NodeRole::Pulse:
+          return NodeRole::Accent;
 
-        case NodeEffect::Accent:
-          return NodeEffect::Flicker;
+        case NodeRole::Accent:
+          return NodeRole::Flicker;
 
-        case NodeEffect::Flicker:
-        case NodeEffect::None:
+        case NodeRole::Flicker:
+        case NodeRole::None:
         default:
-          return NodeEffect::Wash;
+          return NodeRole::Wash;
       }
 
     case NodeKind::Flashlight:
     default:
-      return (currentEffect == NodeEffect::Accent) ? NodeEffect::Pulse : NodeEffect::Accent;
+      return (currentRole == NodeRole::Accent) ? NodeRole::Pulse : NodeRole::Accent;
   }
 }
 
@@ -211,21 +209,21 @@ const char* nodeKindName(NodeKind nodeKind) {
   }
 }
 
-const char* nodeEffectName(NodeEffect nodeEffect) {
-  switch (nodeEffect) {
-    case NodeEffect::Wash:
+const char* nodeRoleName(NodeRole nodeRole) {
+  switch (nodeRole) {
+    case NodeRole::Wash:
       return "wash";
 
-    case NodeEffect::Pulse:
+    case NodeRole::Pulse:
       return "pulse";
 
-    case NodeEffect::Accent:
+    case NodeRole::Accent:
       return "accent";
 
-    case NodeEffect::Flicker:
+    case NodeRole::Flicker:
       return "flicker";
 
-    case NodeEffect::None:
+    case NodeRole::None:
     default:
       return "none";
   }
@@ -247,15 +245,15 @@ bool isSupportedNodeKind(uint8_t rawNodeKind) {
          rawNodeKind == static_cast<uint8_t>(NodeKind::RgbStrip);
 }
 
-bool isSupportedNodeEffect(uint8_t rawNodeEffect) {
-  switch (static_cast<NodeEffect>(rawNodeEffect)) {
-    case NodeEffect::Wash:
-    case NodeEffect::Pulse:
-    case NodeEffect::Accent:
-    case NodeEffect::Flicker:
+bool isSupportedNodeRole(uint8_t rawNodeRole) {
+  switch (static_cast<NodeRole>(rawNodeRole)) {
+    case NodeRole::Wash:
+    case NodeRole::Pulse:
+    case NodeRole::Accent:
+    case NodeRole::Flicker:
       return true;
 
-    case NodeEffect::None:
+    case NodeRole::None:
     default:
       return false;
   }
@@ -279,23 +277,23 @@ NodeKind loadStoredNodeKind() {
   return static_cast<NodeKind>(storedNodeKind);
 }
 
-NodeEffect loadStoredNodeEffect(NodeKind nodeKind) {
+NodeRole loadStoredNodeRole(NodeKind nodeKind) {
   if (!preferences.begin(kConfigNamespace, true)) {
-    return defaultEffectFor(nodeKind);
+    return defaultRoleFor(nodeKind);
   }
 
-  const uint8_t storedNodeEffect = preferences.getUChar(
+  const uint8_t storedNodeRole = preferences.getUChar(
     kConfigNodeEffectKey,
-    static_cast<uint8_t>(defaultEffectFor(nodeKind))
+    static_cast<uint8_t>(defaultRoleFor(nodeKind))
   );
   preferences.end();
 
-  if (!isSupportedNodeEffect(storedNodeEffect)) {
-    return defaultEffectFor(nodeKind);
+  if (!isSupportedNodeRole(storedNodeRole)) {
+    return defaultRoleFor(nodeKind);
   }
 
-  const NodeEffect nodeEffect = static_cast<NodeEffect>(storedNodeEffect);
-  return effectCompatible(nodeKind, nodeEffect) ? nodeEffect : defaultEffectFor(nodeKind);
+  const NodeRole nodeRole = static_cast<NodeRole>(storedNodeRole);
+  return roleCompatible(nodeKind, nodeRole) ? nodeRole : defaultRoleFor(nodeKind);
 }
 
 bool saveNodeKind(NodeKind nodeKind) {
@@ -311,14 +309,14 @@ bool saveNodeKind(NodeKind nodeKind) {
   return bytesWritten == sizeof(uint8_t);
 }
 
-bool saveNodeEffect(NodeEffect nodeEffect) {
+bool saveNodeRole(NodeRole nodeRole) {
   if (!preferences.begin(kConfigNamespace, false)) {
     return false;
   }
 
   const size_t bytesWritten = preferences.putUChar(
     kConfigNodeEffectKey,
-    static_cast<uint8_t>(nodeEffect)
+    static_cast<uint8_t>(nodeRole)
   );
   preferences.end();
   return bytesWritten == sizeof(uint8_t);
@@ -332,8 +330,33 @@ uint16_t currentBpmValue() {
   return beatIntervalMs == 0 ? BPM : static_cast<uint16_t>(60000UL / beatIntervalMs);
 }
 
+const char* runModeName(RunMode mode) {
+  switch (mode) {
+    case RunMode::BrainWaiting:
+      return "brain_wait";
+
+    case RunMode::BrainRunning:
+      return "brain";
+
+    case RunMode::Demo:
+    default:
+      return "demo";
+  }
+}
+
+bool isBrainOwned(RunMode mode) {
+  return mode != RunMode::Demo;
+}
+
+void bumpNodeProfileRevision() {
+  nodeIdentity.profileRevision++;
+  if (nodeIdentity.profileRevision == 0) {
+    nodeIdentity.profileRevision = 1;
+  }
+}
+
 uint8_t currentProgramIndexForStatus() {
-  if (remoteControlActive) {
+  if (isBrainOwned(runMode)) {
     return 255;
   }
 
@@ -360,13 +383,14 @@ void sendNodeStatus(const char* reason) {
   );
 
   if (result != ESP_OK || strcmp(reason, "heartbeat") != 0) {
-    Serial.printf("send=node_status result=%d reason=%s kind=%s role=%s scene=",
+    Serial.printf("send=node_status result=%d reason=%s kind=%s role=%s profile_rev=%u scene=",
                   result,
                   reason,
                   nodeKindName(nodeIdentity.nodeKind),
-                  nodeEffectName(nodeIdentity.nodeEffect));
+                  nodeRoleName(nodeIdentity.nodeEffect),
+                  static_cast<unsigned>(nodeIdentity.profileRevision));
     if (message.currentProgramIndex == 255) {
-      Serial.println("remote");
+      Serial.println("brain");
     } else {
       Serial.println(static_cast<unsigned>(message.currentProgramIndex + 1U));
     }
@@ -395,21 +419,31 @@ void refreshProgramSet() {
   }
 }
 
-void advanceBeatPosition(uint8_t beat, uint32_t bar, uint8_t& nextBeat, uint32_t& nextBar) {
-  nextBeat = beat + 1;
-  nextBar = bar;
-
-  if (nextBeat > beatsPerBar) {
-    nextBeat = 1;
-    nextBar++;
-  }
-}
-
 bool wasSameBeatRenderedRecently(uint8_t beat, uint32_t bar, uint32_t now) {
   return lastBeatRenderedAtMs != 0 &&
          (now - lastBeatRenderedAtMs) <= DUPLICATE_BEAT_GUARD_MS &&
          lastRenderedBeatInBar == beat &&
          lastRenderedBar == bar;
+}
+
+void resetBeatRenderHistory() {
+  lastBeatRenderedAtMs = 0;
+  lastRenderedBeatInBar = 0;
+  lastRenderedBar = 0;
+}
+
+void clearButtonGesture() {
+  buttonPressed = false;
+  longPressHandled = false;
+  buttonPressedAtMs = 0;
+}
+
+void enterBrainWaitingMode() {
+  runMode = RunMode::BrainWaiting;
+  lastClockRevision = 0;
+  lastClockBeatSerial = 0;
+  resetBeatRenderHistory();
+  clearButtonGesture();
 }
 
 void applyFlashCommand(const FlashCommand& command) {
@@ -425,24 +459,22 @@ void applyRgbCommand(const RgbCommand& command) {
   outputMuted = false;
 }
 
-void resetLocalClockState() {
-  brainConnected = false;
-  remoteControlActive = false;
-  awaitingRemoteClock = false;
+void resetDemoClockState() {
+  runMode = RunMode::Demo;
   lastRemoteCommandRevision = 0;
   lastClockRevision = 0;
   lastClockBeatSerial = 0;
-  lastClockSyncAtMs = 0;
-  clockLocked = false;
-  lastBeatRenderedAtMs = 0;
-  lastRenderedBeatInBar = 0;
-  lastRenderedBar = 0;
+  lastBrainSessionId = 0;
+  lastBrainHelloRevision = 0;
+  clearButtonGesture();
+  resetBeatRenderHistory();
   beatIntervalMs = bpmToIntervalMs(BPM);
   beatsPerBar = DEFAULT_BEATS_PER_BAR;
   beatInBar = 1;
   currentBar = 1;
-  nextBeatAtMs = millis() + beatIntervalMs;
-  renderer.syncBeatClock(millis(), beatIntervalMs, beatsPerBar, beatInBar, currentBar);
+  const uint32_t now = millis();
+  nextBeatAtMs = now + beatIntervalMs;
+  renderer.syncBeatClock(now, beatIntervalMs, beatsPerBar, beatInBar, currentBar);
 }
 
 void selectProgram(size_t programIndex, bool announce = true) {
@@ -456,7 +488,7 @@ void selectProgram(size_t programIndex, bool announce = true) {
   } else {
     applyRgbCommand(rgbSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
   }
-  resetLocalClockState();
+  resetDemoClockState();
 
   if (announce) {
     Serial.println();
@@ -468,7 +500,7 @@ void selectProgram(size_t programIndex, bool announce = true) {
                     ? activeFlashCommand.name
                     : activeRgbCommand.name,
                   nodeKindName(nodeIdentity.nodeKind),
-                  nodeEffectName(nodeIdentity.nodeEffect),
+                  nodeRoleName(nodeIdentity.nodeEffect),
                   static_cast<unsigned>(currentBpmValue()));
     Serial.println("-----");
   }
@@ -487,7 +519,7 @@ void selectNextProgram() {
 void printPrograms() {
   Serial.printf("scenes=%s role=%s\n",
                 nodeKindName(nodeIdentity.nodeKind),
-                nodeEffectName(nodeIdentity.nodeEffect));
+                nodeRoleName(nodeIdentity.nodeEffect));
 
   for (size_t i = 0; i < currentProgramCount; ++i) {
     const char* name = nodeIdentity.nodeKind == NodeKind::Flashlight
@@ -503,7 +535,7 @@ void printPrograms() {
 void printHelp() {
   Serial.println();
   Serial.println("Button:");
-  Serial.println("  short press -> next scene (local only)");
+  Serial.println("  short press -> next scene (demo only)");
   Serial.println("  long press  -> next role");
   Serial.println();
   Serial.println("Serial:");
@@ -520,18 +552,17 @@ void printStatus() {
   Serial.println();
   Serial.println("-----");
   Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
-  Serial.printf("node_role=%s\n", nodeEffectName(nodeIdentity.nodeEffect));
+  Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
   Serial.printf("renderer=%s\n", renderer.rendererName());
   Serial.printf("scene=%u/%u name=%s command=%s\n",
                 static_cast<unsigned>(currentProgram + 1),
                 static_cast<unsigned>(currentProgramCount),
                 sceneName(currentProgram),
-                nodeIdentity.nodeKind == NodeKind::Flashlight
+                  nodeIdentity.nodeKind == NodeKind::Flashlight
                   ? activeFlashCommand.name
                   : activeRgbCommand.name);
-  Serial.printf("control=%s clock=%s bpm=%u muted=%u\n",
-                remoteControlActive ? "remote" : "local",
-                clockLocked ? "locked" : "local",
+  Serial.printf("control=%s bpm=%u muted=%u\n",
+                runModeName(runMode),
                 static_cast<unsigned>(currentBpmValue()),
                 static_cast<unsigned>(outputMuted));
   Serial.println("-----");
@@ -541,69 +572,95 @@ void announceNodeProfile() {
   Serial.println();
   Serial.println("-----");
   Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
-  Serial.printf("node_role=%s\n", nodeEffectName(nodeIdentity.nodeEffect));
+  Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
   Serial.printf("renderer=%s\n", renderer.rendererName());
   Serial.printf("runtime=%s\n", runtimeLabelFor(nodeIdentity.nodeKind));
   Serial.println("-----");
 }
 
-void configureNodeProfile(NodeKind nodeKind, NodeEffect nodeEffect) {
-  const NodeEffect effectiveEffect =
-    effectCompatible(nodeKind, nodeEffect) ? nodeEffect : defaultEffectFor(nodeKind);
+void configureNodeProfile(NodeKind nodeKind, NodeRole nodeRole) {
+  const NodeRole effectiveRole =
+    roleCompatible(nodeKind, nodeRole) ? nodeRole : defaultRoleFor(nodeKind);
   nodeIdentity.nodeKind = nodeKind;
-  nodeIdentity.nodeEffect = effectiveEffect;
-  renderer.setNodeProfile(nodeKind, effectiveEffect);
+  nodeIdentity.nodeEffect = effectiveRole;
+  renderer.setNodeProfile(nodeKind, effectiveRole);
   refreshProgramSet();
-  selectProgram(0, false);
 }
 
 void switchNodeKind(NodeKind nodeKind, bool persist) {
-  const NodeEffect effectiveEffect =
-    effectCompatible(nodeKind, nodeIdentity.nodeEffect)
+  const NodeRole effectiveRole =
+    roleCompatible(nodeKind, nodeIdentity.nodeEffect)
       ? nodeIdentity.nodeEffect
-      : defaultEffectFor(nodeKind);
+      : defaultRoleFor(nodeKind);
+  const NodeKind previousKind = nodeIdentity.nodeKind;
+  const NodeRole previousRole = nodeIdentity.nodeEffect;
 
   if (persist) {
-    if (!saveNodeKind(nodeKind) || !saveNodeEffect(effectiveEffect)) {
+    if (!saveNodeKind(nodeKind) || !saveNodeRole(effectiveRole)) {
       Serial.println("config=save_failed");
     }
   }
 
-  configureNodeProfile(nodeKind, effectiveEffect);
+  const bool brainOwned = isBrainOwned(runMode);
+  configureNodeProfile(nodeKind, effectiveRole);
+  if (previousKind != nodeIdentity.nodeKind ||
+      previousRole != nodeIdentity.nodeEffect) {
+    bumpNodeProfileRevision();
+  }
   announceNodeProfile();
   printPrograms();
-  selectProgram(0);
+
+  if (brainOwned) {
+    if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+      applyFlashCommand(REMOTE_IDLE_FLASH_COMMAND);
+    } else {
+      applyRgbCommand(REMOTE_IDLE_RGB_COMMAND);
+    }
+    lastRemoteCommandRevision = 0;
+    enterBrainWaitingMode();
+  } else {
+    selectProgram(0);
+  }
+
   sendNodeStatus("node_mode");
 }
 
-void switchNodeEffect(NodeEffect nodeEffect, bool persist) {
-  if (!effectCompatible(nodeIdentity.nodeKind, nodeEffect)) {
+void switchNodeRole(NodeRole nodeRole, bool persist) {
+  if (!roleCompatible(nodeIdentity.nodeKind, nodeRole)) {
     Serial.printf("serial=role_mismatch role=%s mode=%s\n",
-                  nodeEffectName(nodeEffect),
+                  nodeRoleName(nodeRole),
                   nodeKindName(nodeIdentity.nodeKind));
     return;
   }
 
-  if (persist && !saveNodeEffect(nodeEffect)) {
+  if (persist && !saveNodeRole(nodeRole)) {
     Serial.println("config=save_failed");
   }
 
-  configureNodeProfile(nodeIdentity.nodeKind, nodeEffect);
+  const bool brainOwned = isBrainOwned(runMode);
+  const NodeRole previousRole = nodeIdentity.nodeEffect;
+  configureNodeProfile(nodeIdentity.nodeKind, nodeRole);
+  if (previousRole != nodeIdentity.nodeEffect) {
+    bumpNodeProfileRevision();
+  }
   renderer.showRoleConfirm(nodeIdentity.nodeEffect);
   announceNodeProfile();
   printPrograms();
-  selectProgram(0);
+
+  if (brainOwned) {
+    lastRemoteCommandRevision = 0;
+  } else {
+    selectProgram(0);
+  }
+
   sendNodeStatus("node_role");
 }
 
-void cycleNodeEffect(bool persist) {
-  switchNodeEffect(nextNodeEffect(nodeIdentity.nodeKind, nodeIdentity.nodeEffect), persist);
+void cycleNodeRole(bool persist) {
+  switchNodeRole(nextNodeRole(nodeIdentity.nodeKind, nodeIdentity.nodeEffect), persist);
 }
 
 void runBrainConnectSequence() {
-  lastBrainActivityAtMs = millis();
-  brainConnected = true;
-  brainConnectSequenceShown = true;
   renderer.allOff();
 
   for (uint8_t i = 0; i < BRAIN_CONNECT_FLASH_COUNT; ++i) {
@@ -698,149 +755,103 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
 }
 
 void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
-  (void)message;
-  const uint32_t now = millis();
-  if (lastBrainHelloHandledAtMs != 0 &&
-      (now - lastBrainHelloHandledAtMs) < BRAIN_HELLO_DEDUP_MS) {
+  const bool sameBrainSession =
+    message.sessionId != 0 && message.sessionId == lastBrainSessionId;
+  if (sameBrainSession &&
+      message.helloRevision != 0 &&
+      message.helloRevision == lastBrainHelloRevision) {
     return;
   }
 
-  lastBrainHelloHandledAtMs = now;
-  lastBrainActivityAtMs = now;
-  brainConnectSequenceShown = false;
-  runBrainConnectSequence();
+  const bool newBrainSession =
+    message.sessionId == 0 || message.sessionId != lastBrainSessionId;
+  lastBrainSessionId = message.sessionId;
+  lastBrainHelloRevision = message.helloRevision;
+  if (newBrainSession) {
+    runBrainConnectSequence();
+  }
 
   if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
     applyFlashCommand(REMOTE_IDLE_FLASH_COMMAND);
   } else {
     applyRgbCommand(REMOTE_IDLE_RGB_COMMAND);
   }
-  remoteControlActive = true;
-  awaitingRemoteClock = true;
-  clockLocked = false;
-  Serial.println("remote=waiting_for_brain");
+  lastRemoteCommandRevision = 0;
+  enterBrainWaitingMode();
+  Serial.println("brain=waiting_for_clock");
   sendNodeStatus("brain_hello");
 }
 
 void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
-  lastBrainActivityAtMs = millis();
-
   if (nodeIdentity.nodeKind != NodeKind::Flashlight ||
       message.targetNodeKind != nodeIdentity.nodeKind ||
       message.targetNodeEffect != nodeIdentity.nodeEffect) {
     return;
   }
 
-  if (!brainConnected) {
-    brainConnected = true;
-  }
-
-  if (remoteControlActive && message.commandRevision == lastRemoteCommandRevision) {
+  if (isBrainOwned(runMode) &&
+      message.commandRevision == lastRemoteCommandRevision) {
     return;
   }
 
   applyFlashCommand(message.command);
-  remoteControlActive = true;
-  awaitingRemoteClock = true;
   lastRemoteCommandRevision = message.commandRevision;
+  enterBrainWaitingMode();
 
-  Serial.printf("remote=flash command=%s role=%s bpm=%u\n",
+  Serial.printf("brain=flash command=%s role=%s bpm=%u\n",
                 activeFlashCommand.name,
-                nodeEffectName(nodeIdentity.nodeEffect),
+                nodeRoleName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
   sendNodeStatus("remote_flash");
 }
 
 void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
-  lastBrainActivityAtMs = millis();
-
   if (nodeIdentity.nodeKind != NodeKind::RgbStrip ||
       message.targetNodeKind != nodeIdentity.nodeKind ||
       message.targetNodeEffect != nodeIdentity.nodeEffect) {
     return;
   }
 
-  if (!brainConnected) {
-    brainConnected = true;
-  }
-
-  if (remoteControlActive && message.commandRevision == lastRemoteCommandRevision) {
+  if (isBrainOwned(runMode) &&
+      message.commandRevision == lastRemoteCommandRevision) {
     return;
   }
 
   applyRgbCommand(message.command);
-  remoteControlActive = true;
-  awaitingRemoteClock = true;
   lastRemoteCommandRevision = message.commandRevision;
+  enterBrainWaitingMode();
 
-  Serial.printf("remote=rgb command=%s role=%s bpm=%u\n",
+  Serial.printf("brain=rgb command=%s role=%s bpm=%u\n",
                 activeRgbCommand.name,
-                nodeEffectName(nodeIdentity.nodeEffect),
+                nodeRoleName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
   sendNodeStatus("remote_rgb");
 }
 
 void applyClockSync(const ClockSyncMessage& message) {
-  lastBrainActivityAtMs = millis();
+  if (!isBrainOwned(runMode)) {
+    return;
+  }
 
   if (message.clockRevision == lastClockRevision &&
       message.beatSerial == lastClockBeatSerial) {
     return;
   }
 
-  if (!brainConnected) {
-    brainConnected = true;
-  }
-
-  const uint32_t now = millis();
   lastClockRevision = message.clockRevision;
   lastClockBeatSerial = message.beatSerial;
-  lastClockSyncAtMs = now;
   beatIntervalMs = bpmToIntervalMs(message.bpm);
-  beatsPerBar = message.beatsPerBar;
-  awaitingRemoteClock = false;
-
-  if (!remoteControlActive) {
-    advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
-    nextBeatAtMs = now + beatIntervalMs;
-    clockLocked = true;
-    return;
-  }
+  beatsPerBar = (message.beatsPerBar == 0) ? DEFAULT_BEATS_PER_BAR : message.beatsPerBar;
+  runMode = RunMode::BrainRunning;
+  const uint32_t now = millis();
 
   if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
-    advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
-    nextBeatAtMs = lastBeatRenderedAtMs + beatIntervalMs;
-    clockLocked = true;
+    nextBeatAtMs = now + beatIntervalMs;
     return;
   }
 
-  const bool recentMatchingBeat =
-    wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now) &&
-    (now - lastBeatRenderedAtMs) <= SOFT_SYNC_MATCH_WINDOW_MS;
-
-  if (recentMatchingBeat) {
-    const uint32_t desiredNextBeatAtMs = now + beatIntervalMs;
-    const int32_t phaseErrorMs =
-      static_cast<int32_t>(desiredNextBeatAtMs) - static_cast<int32_t>(nextBeatAtMs);
-
-    if (abs(phaseErrorMs) <= HARD_SYNC_ERROR_MS) {
-      int32_t correctionMs = phaseErrorMs / 2;
-      if (correctionMs > SOFT_SYNC_MAX_CORRECTION_MS) {
-        correctionMs = SOFT_SYNC_MAX_CORRECTION_MS;
-      } else if (correctionMs < -SOFT_SYNC_MAX_CORRECTION_MS) {
-        correctionMs = -SOFT_SYNC_MAX_CORRECTION_MS;
-      }
-
-      nextBeatAtMs = static_cast<uint32_t>(static_cast<int32_t>(nextBeatAtMs) + correctionMs);
-      advanceBeatPosition(message.beatInBar, message.currentBar, beatInBar, currentBar);
-      clockLocked = true;
-      return;
-    }
-  }
-
-  beatInBar = message.beatInBar;
-  currentBar = message.currentBar;
-  clockLocked = true;
+  beatInBar = (message.beatInBar == 0) ? 1U : message.beatInBar;
+  currentBar = (message.currentBar == 0) ? 1U : message.currentBar;
   onBeat();
   nextBeatAtMs = now + beatIntervalMs;
 }
@@ -935,7 +946,7 @@ void serviceButton() {
     if ((now - buttonPressedAtMs) >= BUTTON_LONG_PRESS_MS) {
       longPressHandled = true;
       Serial.println("button=long_press");
-      cycleNodeEffect(true);
+      cycleNodeRole(true);
     }
     return;
   }
@@ -943,7 +954,7 @@ void serviceButton() {
   if (!isPressed && buttonPressed) {
     buttonPressed = false;
 
-    if (!longPressHandled && !brainConnected && !remoteControlActive) {
+    if (!longPressHandled && runMode == RunMode::Demo) {
       Serial.println("button=short_press");
       selectNextProgram();
     }
@@ -989,12 +1000,12 @@ void onBeat() {
     } else {
       bool trigger = false;
       switch (activeRgbCommand.pattern) {
-        case RgbPattern::BeatPulse:
-        case RgbPattern::Accent:
         case RgbPattern::RunnerFlicker:
           trigger = isTriggerBeat(activeRgbCommand.triggerEveryBars, activeRgbCommand.triggerBeat);
           break;
 
+        case RgbPattern::BeatPulse:
+        case RgbPattern::Accent:
         case RgbPattern::BarWave:
         case RgbPattern::Off:
         default:
@@ -1017,33 +1028,11 @@ void onBeat() {
 }
 
 void serviceClock() {
+  if (runMode == RunMode::BrainWaiting) {
+    return;
+  }
+
   const uint32_t now = millis();
-
-  if (brainConnectSequenceShown &&
-      lastBrainActivityAtMs != 0 &&
-      (now - lastBrainActivityAtMs) >= CLOCK_SYNC_TIMEOUT_MS) {
-    brainConnected = false;
-    awaitingRemoteClock = false;
-    brainConnectSequenceShown = false;
-  }
-
-  if (clockLocked && lastClockSyncAtMs != 0 &&
-      (now - lastClockSyncAtMs) >= CLOCK_SYNC_TIMEOUT_MS) {
-    clockLocked = false;
-    if (brainConnected) {
-      brainConnected = false;
-      awaitingRemoteClock = false;
-    }
-  }
-
-  if (brainConnected && !remoteControlActive) {
-    return;
-  }
-
-  if (remoteControlActive && awaitingRemoteClock) {
-    return;
-  }
-
   while ((int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();
     nextBeatAtMs += beatIntervalMs;
@@ -1078,12 +1067,12 @@ void normalizeSerialLine(char* line) {
   }
 }
 
-bool parseNodeEffect(const char* line, NodeEffect& parsedEffect) {
+bool parseNodeRole(const char* line, NodeRole& parsedRole) {
   if (strcmp(line, "role wash") == 0 ||
       strcmp(line, "effect wash") == 0 ||
       strcmp(line, "effect ambient") == 0 ||
       strcmp(line, "effect bluewash") == 0) {
-    parsedEffect = NodeEffect::Wash;
+    parsedRole = NodeRole::Wash;
     return true;
   }
 
@@ -1091,7 +1080,7 @@ bool parseNodeEffect(const char* line, NodeEffect& parsedEffect) {
       strcmp(line, "effect pulse") == 0 ||
       strcmp(line, "effect bluepulse") == 0 ||
       strcmp(line, "effect flashpulse") == 0) {
-    parsedEffect = NodeEffect::Pulse;
+    parsedRole = NodeRole::Pulse;
     return true;
   }
 
@@ -1099,7 +1088,7 @@ bool parseNodeEffect(const char* line, NodeEffect& parsedEffect) {
       strcmp(line, "effect accent") == 0 ||
       strcmp(line, "effect redaccent") == 0 ||
       strcmp(line, "effect flashaccent") == 0) {
-    parsedEffect = NodeEffect::Accent;
+    parsedRole = NodeRole::Accent;
     return true;
   }
 
@@ -1107,7 +1096,7 @@ bool parseNodeEffect(const char* line, NodeEffect& parsedEffect) {
       strcmp(line, "effect flicker") == 0 ||
       strcmp(line, "effect motion") == 0 ||
       strcmp(line, "effect blueredflicker") == 0) {
-    parsedEffect = NodeEffect::Flicker;
+    parsedRole = NodeRole::Flicker;
     return true;
   }
 
@@ -1135,9 +1124,9 @@ void processSerialCommand(const char* line) {
     return;
   }
 
-  NodeEffect parsedEffect = NodeEffect::None;
-  if (parseNodeEffect(line, parsedEffect)) {
-    switchNodeEffect(parsedEffect, true);
+  NodeRole parsedRole = NodeRole::None;
+  if (parseNodeRole(line, parsedRole)) {
+    switchNodeRole(parsedRole, true);
     return;
   }
 
@@ -1178,8 +1167,8 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT);
 
   const NodeKind storedKind = loadStoredNodeKind();
-  const NodeEffect storedEffect = loadStoredNodeEffect(storedKind);
-  configureNodeProfile(storedKind, storedEffect);
+  const NodeRole storedRole = loadStoredNodeRole(storedKind);
+  configureNodeProfile(storedKind, storedRole);
 
   Serial.println();
   Serial.println("Decaflash Node V2");
@@ -1190,7 +1179,7 @@ void setup() {
     static_cast<unsigned>(nodeIdentity.nodeEffect)
   );
   Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
-  Serial.printf("node_role=%s\n", nodeEffectName(nodeIdentity.nodeEffect));
+  Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
   Serial.printf("runtime=%s\n", runtimeLabelFor(nodeIdentity.nodeKind));
   Serial.println("controls=atom button + serial");
   Serial.printf("renderer=%s\n", renderer.rendererName());
@@ -1216,7 +1205,7 @@ void setup() {
   if (espNowReady) {
     esp_now_register_recv_cb(onEspNowReceive);
   }
-  Serial.println("runtime=local scene demo + remote scene receive");
+  Serial.println("runtime=demo scene playback + brain assignment receive");
   Serial.println("node_stack=kind+role aware");
   printPrograms();
   printHelp();

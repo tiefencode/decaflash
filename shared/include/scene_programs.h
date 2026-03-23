@@ -86,11 +86,13 @@ inline SceneDefinition makeScene1() {
   constexpr RgbColor kDeepBlue = {0, 24, 110};
   constexpr RgbColor kIceBlue = {92, 214, 255};
   constexpr RgbColor kAccentBlue = {18, 120, 255};
-  constexpr RgbColor kWhite = {255, 255, 255};
+  constexpr RgbColor kPulseBlue = {0, 78, 255};
+  constexpr RgbColor kHeartDarkRed = {84, 0, 6};
+  constexpr RgbColor kHeartRed = {255, 18, 0};
   constexpr uint8_t kWashFloor = 0;
   constexpr uint8_t kWashBase = 18;
   constexpr uint8_t kWashPeak = 170;
-  constexpr uint16_t kWashTravelMs = 620;
+  constexpr uint16_t kWashTravelMs = 420;
   constexpr uint16_t kWashWhiteHoldMs = 120;
 
   // Szene 1 startet mit einer langsamen 4-Takte-Welle:
@@ -118,29 +120,29 @@ inline SceneDefinition makeScene1() {
     rgbCommand(
       "Scene 1 Pulse",
       RgbPattern::BeatPulse,
-      kDeepBlue,
-      kIceBlue,
-      4,
-      18,
-      88,
+      kPulseBlue,
+      kPulseBlue,
+      0,
+      86,
+      116,
       1,
       1,
-      2200,
-      240
+      380,
+      100
     ),
 
     rgbCommand(
       "Scene 1 Accent",
       RgbPattern::Accent,
-      kDeepBlue,
-      kWhite,
+      kHeartDarkRed,
+      kHeartRed,
       0,
-      12,
-      190,
-      4,
-      4,
-      1800,
-      220
+      14,
+      176,
+      2,
+      1,
+      0,
+      0
     ),
 
     rgbCommand(
