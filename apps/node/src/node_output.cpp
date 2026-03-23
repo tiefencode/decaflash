@@ -16,6 +16,8 @@ const char* rendererNameFor(decaflash::NodeKind nodeKind) {
 }  // namespace
 
 void NodeOutput::setNodeProfile(decaflash::NodeKind nodeKind, decaflash::NodeEffect nodeEffect) {
+  statusLed_.begin();
+
   const bool sameProfile =
     nodeKindInitialized_ && nodeKind_ == nodeKind && nodeEffect_ == nodeEffect;
   if (sameProfile) {
@@ -50,6 +52,10 @@ void NodeOutput::setFlashCommand(const decaflash::FlashCommand& command) {
 void NodeOutput::setRgbCommand(const decaflash::RgbCommand& command) {
   rgbStrip_.setNodeEffect(nodeEffect_);
   rgbStrip_.setCommand(command);
+}
+
+void NodeOutput::showRoleConfirm(decaflash::NodeEffect nodeEffect) {
+  statusLed_.showRoleConfirm(nodeEffect);
 }
 
 void NodeOutput::triggerRgbAccent() {

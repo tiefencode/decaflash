@@ -25,7 +25,6 @@ class RgbStripRenderer {
   uint8_t breatheLevel(uint32_t now, uint8_t low, uint8_t high) const;
   uint8_t accentLevel(uint32_t now, uint8_t low, uint8_t high) const;
   uint8_t clampLevel(uint16_t level) const;
-  void runStartupProbe();
 
   decaflash::NodeEffect nodeEffect_ = decaflash::NodeEffect::Pulse;
   decaflash::RgbCommand currentCommand_ = {};

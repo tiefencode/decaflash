@@ -84,6 +84,7 @@ bool syncBeatDotPending = false;
 size_t currentSceneIndex = 0;
 uint32_t lastMeterDrawAtMs = 0;
 bool audioClockLocked = false;
+bool pendingCommandRefresh = false;
 uint8_t audioSyncCandidateCount = 0;
 uint16_t audioSyncCandidateBpm = 0;
 uint16_t audioFollowCandidateBpm = 0;
@@ -302,8 +303,10 @@ void processPendingNodeStatuses(uint32_t now) {
 
     if (!wasActive) {
       printTrackedNode(*slot, "seen");
+      pendingCommandRefresh = true;
     } else if (changed) {
       printTrackedNode(*slot, "update");
+      pendingCommandRefresh = true;
     }
   }
 }
@@ -783,6 +786,7 @@ void selectNextScene() {
 
 void activateBrain() {
   brainLive = true;
+  pendingCommandRefresh = false;
   resetAudioClockFollow();
   beatSerial = 0;
   beatInBar = 1;
@@ -847,6 +851,12 @@ void loop() {
   microphone.update();
   processPendingNodeStatuses(now);
   expireTrackedNodes(now);
+
+  if (brainLive && pendingCommandRefresh) {
+    sendCurrentCommands();
+    nextSendAtMs = now + COMMAND_REFRESH_MS;
+    pendingCommandRefresh = false;
+  }
 
   if (M5.Btn.wasPressed()) {
     if (brainLive) {

@@ -7,7 +7,6 @@ namespace {
 static constexpr uint8_t kRgbDataPinPrimary = 26;
 static constexpr uint8_t kRgbDataPinSecondary = 32;
 static constexpr uint8_t kRgbLedCount = 15;
-static constexpr uint16_t kStartupProbeStepMs = 220;
 static constexpr uint16_t kConnectPulseMs = 140;
 
 CRGB gStripLeds[kRgbLedCount];
@@ -65,7 +64,6 @@ void RgbStripRenderer::begin() {
   FastLED.setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(255);
   initialized_ = true;
-  runStartupProbe();
   allOff();
 }
 
@@ -367,13 +365,4 @@ uint8_t RgbStripRenderer::accentLevel(uint32_t now, uint8_t low, uint8_t high) c
 
 uint8_t RgbStripRenderer::clampLevel(uint16_t level) const {
   return static_cast<uint8_t>(level > 255U ? 255U : level);
-}
-
-void RgbStripRenderer::runStartupProbe() {
-  renderSolid(255, 0, 0);
-  delay(kStartupProbeStepMs);
-  renderSolid(0, 255, 0);
-  delay(kStartupProbeStepMs);
-  renderSolid(0, 0, 255);
-  delay(kStartupProbeStepMs);
 }

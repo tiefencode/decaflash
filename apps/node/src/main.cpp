@@ -45,6 +45,7 @@ static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
 static constexpr uint32_t STARTUP_DELAY_MS = 500;
 static constexpr uint32_t CLOCK_SYNC_TIMEOUT_MS = 4000;
+static constexpr uint32_t BRAIN_HELLO_DEDUP_MS = 1500;
 static constexpr uint8_t BRAIN_CONNECT_FLASH_COUNT = 3;
 static constexpr uint32_t BRAIN_CONNECT_FLASH_INTERVAL_MS = 1000;
 static constexpr uint16_t BRAIN_CONNECT_FLASH_DURATION_MS = 260;
@@ -134,6 +135,7 @@ uint32_t lastClockRevision = 0;
 uint32_t lastClockBeatSerial = 0;
 uint32_t lastClockSyncAtMs = 0;
 uint32_t lastBrainActivityAtMs = 0;
+uint32_t lastBrainHelloHandledAtMs = 0;
 bool clockLocked = false;
 bool brainConnectSequenceShown = false;
 uint32_t lastBeatRenderedAtMs = 0;
@@ -197,6 +199,31 @@ bool effectCompatible(NodeKind nodeKind, NodeEffect nodeEffect) {
 
     default:
       return false;
+  }
+}
+
+NodeEffect nextNodeEffect(NodeKind nodeKind, NodeEffect currentEffect) {
+  switch (nodeKind) {
+    case NodeKind::RgbStrip:
+      switch (currentEffect) {
+        case NodeEffect::Wash:
+          return NodeEffect::Pulse;
+
+        case NodeEffect::Pulse:
+          return NodeEffect::Accent;
+
+        case NodeEffect::Accent:
+          return NodeEffect::Flicker;
+
+        case NodeEffect::Flicker:
+        case NodeEffect::None:
+        default:
+          return NodeEffect::Wash;
+      }
+
+    case NodeKind::Flashlight:
+    default:
+      return (currentEffect == NodeEffect::Accent) ? NodeEffect::Pulse : NodeEffect::Accent;
   }
 }
 
@@ -514,8 +541,8 @@ void printPrograms() {
 void printHelp() {
   Serial.println();
   Serial.println("Button:");
-  Serial.println("  short press -> next scene");
-  Serial.println("  long press  -> mute output");
+  Serial.println("  short press -> next scene (local only)");
+  Serial.println("  long press  -> next role");
   Serial.println();
   Serial.println("Serial:");
   Serial.println("  mode rgb");
@@ -600,20 +627,20 @@ void switchNodeEffect(NodeEffect nodeEffect, bool persist) {
   }
 
   configureNodeProfile(nodeIdentity.nodeKind, nodeEffect);
+  renderer.showRoleConfirm(nodeIdentity.nodeEffect);
   announceNodeProfile();
   printPrograms();
   selectProgram(0);
   sendNodeStatus("node_role");
 }
 
+void cycleNodeEffect(bool persist) {
+  switchNodeEffect(nextNodeEffect(nodeIdentity.nodeKind, nodeIdentity.nodeEffect), persist);
+}
+
 void runBrainConnectSequence() {
   lastBrainActivityAtMs = millis();
   brainConnected = true;
-
-  if (brainConnectSequenceShown) {
-    return;
-  }
-
   brainConnectSequenceShown = true;
   burst.active = false;
   burst.remaining = 0;
@@ -712,23 +739,30 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
 
 void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
   (void)message;
-  lastBrainActivityAtMs = millis();
-
-  if (!brainConnected) {
-    runBrainConnectSequence();
-    if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
-      applyFlashCommand(REMOTE_IDLE_FLASH_COMMAND);
-    } else {
-      applyRgbCommand(REMOTE_IDLE_RGB_COMMAND);
-    }
-    remoteControlActive = true;
-    awaitingRemoteClock = true;
-    Serial.println();
-    Serial.println("-----");
-    Serial.println("REMOTE: waiting for brain");
-    Serial.println("-----");
-    sendNodeStatus("brain_hello");
+  const uint32_t now = millis();
+  if (lastBrainHelloHandledAtMs != 0 &&
+      (now - lastBrainHelloHandledAtMs) < BRAIN_HELLO_DEDUP_MS) {
+    return;
   }
+
+  lastBrainHelloHandledAtMs = now;
+  lastBrainActivityAtMs = now;
+  brainConnectSequenceShown = false;
+  runBrainConnectSequence();
+
+  if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+    applyFlashCommand(REMOTE_IDLE_FLASH_COMMAND);
+  } else {
+    applyRgbCommand(REMOTE_IDLE_RGB_COMMAND);
+  }
+  remoteControlActive = true;
+  awaitingRemoteClock = true;
+  clockLocked = false;
+  Serial.println();
+  Serial.println("-----");
+  Serial.println("REMOTE: waiting for brain");
+  Serial.println("-----");
+  sendNodeStatus("brain_hello");
 }
 
 void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
@@ -741,7 +775,7 @@ void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
   }
 
   if (!brainConnected) {
-    runBrainConnectSequence();
+    brainConnected = true;
   }
 
   if (remoteControlActive && message.commandRevision == lastRemoteCommandRevision) {
@@ -774,7 +808,7 @@ void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
   }
 
   if (!brainConnected) {
-    runBrainConnectSequence();
+    brainConnected = true;
   }
 
   if (remoteControlActive && message.commandRevision == lastRemoteCommandRevision) {
@@ -806,7 +840,7 @@ void applyClockSync(const ClockSyncMessage& message) {
   }
 
   if (!brainConnected) {
-    runBrainConnectSequence();
+    brainConnected = true;
   }
 
   const uint32_t now = millis();
@@ -926,20 +960,7 @@ void serviceNodeStatus() {
   nextStatusAtMs = now + NODE_STATUS_INTERVAL_MS;
 }
 
-void outputOffFromButton() {
-  Serial.println("button=long_press");
-  outputMuted = true;
-  renderer.allOff();
-  burst.active = false;
-  burst.remaining = 0;
-  Serial.println("output=off");
-}
-
 void serviceButton() {
-  if (brainConnected || remoteControlActive) {
-    return;
-  }
-
   const uint32_t now = millis();
   const bool level = digitalRead(BUTTON_PIN);
 
@@ -964,7 +985,8 @@ void serviceButton() {
   if (isPressed && buttonPressed && !longPressHandled) {
     if ((now - buttonPressedAtMs) >= BUTTON_LONG_PRESS_MS) {
       longPressHandled = true;
-      outputOffFromButton();
+      Serial.println("button=long_press");
+      cycleNodeEffect(true);
     }
     return;
   }
@@ -972,7 +994,7 @@ void serviceButton() {
   if (!isPressed && buttonPressed) {
     buttonPressed = false;
 
-    if (!longPressHandled) {
+    if (!longPressHandled && !brainConnected && !remoteControlActive) {
       Serial.println("button=short_press");
       selectNextProgram();
     }
@@ -1339,7 +1361,7 @@ void setup() {
   Serial.println("controls=atom button + serial");
   Serial.printf("renderer=%s\n", renderer.rendererName());
   if (nodeIdentity.nodeKind == NodeKind::RgbStrip) {
-    Serial.println("rgb_driver=sk6812 pins=26+32 startup_probe=rgb");
+    Serial.println("rgb_driver=sk6812 pins=26+32");
   }
   Serial.printf("clock=%u bpm %u/4\n", BPM, beatsPerBar);
 
