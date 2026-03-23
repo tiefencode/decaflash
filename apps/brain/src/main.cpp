@@ -548,9 +548,8 @@ void updateBeatDotOverlay(uint32_t now) {
     return;
   }
 
-  if (isSceneUiActive(now)) {
-    decaflash::brain::matrix::drawSceneCornerPixel(currentSceneIndex);
-  }
+  (void)now;
+  decaflash::brain::matrix::clearBeatDotPixel();
 }
 
 void updateIdleMatrixUi(uint32_t now) {
@@ -570,7 +569,7 @@ void onBeat() {
   const uint8_t currentBeat = beatInBar;
 
   beatDotBeat = currentBeat;
-  beatDotColorOverride = syncBeatDotPending ? 0x005AFF : 0;
+  beatDotColorOverride = syncBeatDotPending ? 0xFF0000 : 0;
   syncBeatDotPending = false;
   beatDotUntilMs = millis() + BEAT_DOT_FLASH_MS;
 

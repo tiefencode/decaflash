@@ -42,15 +42,23 @@ uint32_t beatDotColor(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
     return beatDotColorOverride;
   }
 
-  return (beatDotBeat == 1) ? color(255, 0, 0) : color(255, 255, 255);
+  return (beatDotBeat == 1) ? color(255, 210, 0) : color(255, 255, 255);
 }
 
 }  // namespace
 
 void clearMatrix() {
   for (uint8_t i = 0; i < kMatrixPixelCount; ++i) {
+    if (i == kBeatDotPixelIndex) {
+      continue;
+    }
+
     M5.dis.drawpix(i, 0x000000);
   }
+}
+
+void clearBeatDotPixel() {
+  M5.dis.drawpix(kBeatDotPixelIndex, 0x000000);
 }
 
 void drawSceneNumber(size_t sceneIndex) {
@@ -63,13 +71,13 @@ void drawSceneNumber(size_t sceneIndex) {
   const uint8_t* rows = kDigitMasks[sceneIndex];
   for (uint8_t y = 0; y < 5; ++y) {
     for (uint8_t x = 0; x < 5; ++x) {
+      if ((y * 5U + x) == kBeatDotPixelIndex) {
+        continue;
+      }
+
       M5.dis.drawpix(y * 5 + x, scenePixelColor(sceneIndex, x, y));
     }
   }
-}
-
-void drawSceneCornerPixel(size_t sceneIndex) {
-  M5.dis.drawpix(kBeatDotPixelIndex, scenePixelColor(sceneIndex, 4, 0));
 }
 
 void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
