@@ -51,6 +51,149 @@ CRGB secondaryColor(const decaflash::RgbCommand& command) {
   return CRGB(command.secondaryR, command.secondaryG, command.secondaryB);
 }
 
+struct WavePhaseLayout {
+  uint8_t deepBlueEnd;
+  uint8_t lightBlueEnd;
+  uint8_t whiteRiseEnd;
+  uint8_t whiteHoldEnd;
+};
+
+struct WavePixelState {
+  CRGB color = CRGB::Black;
+  uint8_t level = 0;
+};
+
+uint8_t segmentMix8(uint8_t phase, uint8_t start, uint8_t end) {
+  if (end <= start) {
+    return 255U;
+  }
+
+  if (phase <= start) {
+    return 0U;
+  }
+
+  if (phase >= end) {
+    return 255U;
+  }
+
+  return static_cast<uint8_t>(
+    (static_cast<uint16_t>(phase - start) * 255U) / static_cast<uint16_t>(end - start)
+  );
+}
+
+uint8_t mixLevel(uint8_t from, uint8_t to, uint8_t mix) {
+  const int16_t delta = static_cast<int16_t>(to) - static_cast<int16_t>(from);
+  int16_t value = static_cast<int16_t>(from) + ((delta * mix) / 255);
+  if (value < 0) {
+    value = 0;
+  } else if (value > 255) {
+    value = 255;
+  }
+
+  return static_cast<uint8_t>(value);
+}
+
+WavePhaseLayout barWaveLayout(const decaflash::RgbCommand& command, uint32_t phraseDurationMs) {
+  const uint8_t deepBlueEnd = 96U;
+  const uint8_t lightBlueEnd = 206U;
+  const uint8_t whiteRiseEnd = 228U;
+  uint8_t whiteHoldWidth = static_cast<uint8_t>(
+    (static_cast<uint32_t>(command.accentDurationMs) * 255UL) / phraseDurationMs
+  );
+  if (whiteHoldWidth > 10U) {
+    whiteHoldWidth = 10U;
+  }
+
+  return {
+    deepBlueEnd,
+    lightBlueEnd,
+    whiteRiseEnd,
+    static_cast<uint8_t>(whiteRiseEnd + whiteHoldWidth),
+  };
+}
+
+WavePixelState baseBarWaveState(
+  const decaflash::RgbCommand& command,
+  const WavePhaseLayout& layout,
+  uint8_t phase
+) {
+  const CRGB deepBlue = primaryColor(command);
+  const CRGB lightBlue = secondaryColor(command);
+  const CRGB white = CRGB(190, 220, 255);
+  const uint8_t preWhiteLevel = mixLevel(command.baseLevel, command.peakLevel, 196U);
+  WavePixelState state = {};
+
+  if (phase < layout.deepBlueEnd) {
+    const uint8_t mix = ease8InOutCubic(segmentMix8(phase, 0U, layout.deepBlueEnd));
+    state.color = blend(CRGB::Black, deepBlue, mix);
+    state.level = mixLevel(command.floorLevel, command.baseLevel, mix);
+    return state;
+  }
+
+  if (phase < layout.lightBlueEnd) {
+    const uint8_t mix = ease8InOutCubic(
+      segmentMix8(phase, layout.deepBlueEnd, layout.lightBlueEnd)
+    );
+    state.color = blend(deepBlue, lightBlue, mix);
+    state.level = mixLevel(command.baseLevel, preWhiteLevel, mix);
+    return state;
+  }
+
+  if (phase < layout.whiteRiseEnd) {
+    const uint8_t mix = ease8InOutCubic(
+      segmentMix8(phase, layout.lightBlueEnd, layout.whiteRiseEnd)
+    );
+    state.color = blend(lightBlue, white, mix);
+    state.level = mixLevel(preWhiteLevel, command.peakLevel, mix);
+    return state;
+  }
+
+  if (phase < layout.whiteHoldEnd) {
+    state.color = white;
+    state.level = command.peakLevel;
+    return state;
+  }
+
+  const uint8_t mix = ease8InOutCubic(segmentMix8(phase, layout.whiteHoldEnd, 255U));
+  state.color = blend(white, CRGB::Black, mix);
+  state.level = mixLevel(command.peakLevel, 0U, mix);
+  return state;
+}
+
+void applyBarWaveModulation(
+  const decaflash::RgbCommand& command,
+  const WavePhaseLayout& layout,
+  uint32_t now,
+  uint8_t pixel,
+  uint8_t phase,
+  WavePixelState& state
+) {
+  // This is the seam where future audio-driven modulation can hook in.
+  const uint8_t flicker = pseudoFlicker(now, pixel);
+  if (phase < layout.whiteRiseEnd) {
+    const uint8_t lift = static_cast<uint8_t>(flicker / 6U);
+    state.level = mixLevel(
+      state.level,
+      static_cast<uint8_t>(state.level > (255U - lift) ? 255U : state.level + lift),
+      116U
+    );
+  }
+
+  const bool nearCrest = phase >= static_cast<uint8_t>(layout.lightBlueEnd - 8U) &&
+                         phase <= static_cast<uint8_t>(layout.whiteHoldEnd + 10U);
+  const uint8_t sparkleSeed = hash8((now / 65U) + static_cast<uint32_t>(pixel * 37U) + phase);
+  if (nearCrest && sparkleSeed > 240U) {
+    state.color = blend(state.color, CRGB::White, 170U);
+    state.level = mixLevel(state.level, command.peakLevel, 188U);
+    return;
+  }
+
+  const uint8_t driftSeed = segmentNoise8(now + static_cast<uint32_t>(pixel * 41U), 280U, 73U);
+  if (phase >= layout.deepBlueEnd && phase < layout.whiteRiseEnd) {
+    state.color = blend(state.color, secondaryColor(command), static_cast<uint8_t>(driftSeed / 4U));
+  }
+}
+
 }  // namespace
 
 void RgbStripRenderer::begin() {
@@ -82,6 +225,7 @@ void RgbStripRenderer::setNodeEffect(decaflash::NodeEffect nodeEffect) {
   effectStartedAtMs_ = millis();
   accentStartedAtMs_ = 0;
   accentEndsAtMs_ = 0;
+  beatStartedAtMs_ = effectStartedAtMs_;
 }
 
 void RgbStripRenderer::setCommand(const decaflash::RgbCommand& command) {
@@ -89,6 +233,7 @@ void RgbStripRenderer::setCommand(const decaflash::RgbCommand& command) {
   effectStartedAtMs_ = millis();
   accentStartedAtMs_ = 0;
   accentEndsAtMs_ = 0;
+  beatStartedAtMs_ = effectStartedAtMs_;
 }
 
 void RgbStripRenderer::flash100(uint16_t flashMs) {
@@ -109,14 +254,28 @@ void RgbStripRenderer::triggerAccent() {
   accentEndsAtMs_ = now + accentDurationMs;
 }
 
+void RgbStripRenderer::syncBeatClock(
+  uint32_t now,
+  uint32_t beatIntervalMs,
+  uint8_t beatsPerBar,
+  uint8_t beatInBar,
+  uint32_t currentBar
+) {
+  beatStartedAtMs_ = now;
+  beatIntervalMs_ = (beatIntervalMs == 0) ? 500U : beatIntervalMs;
+  beatsPerBar_ = (beatsPerBar == 0) ? 4U : beatsPerBar;
+  beatInBar_ = (beatInBar == 0) ? 1U : beatInBar;
+  currentBar_ = (currentBar == 0) ? 1U : currentBar;
+}
+
 void RgbStripRenderer::service(uint32_t now) {
   if (!initialized_) {
     begin();
   }
 
   switch (currentCommand_.pattern) {
-    case decaflash::RgbPattern::Breathe:
-      renderBreathe(now);
+    case decaflash::RgbPattern::BarWave:
+      renderBarWave(now);
       break;
 
     case decaflash::RgbPattern::BeatPulse:
@@ -145,45 +304,48 @@ void RgbStripRenderer::renderSolid(uint8_t red, uint8_t green, uint8_t blue) {
   FastLED.show();
 }
 
-void RgbStripRenderer::renderBreathe(uint32_t now) {
-  const uint32_t elapsedMs = now - effectStartedAtMs_;
-  const uint8_t level =
-    breatheLevel(now, currentCommand_.floorLevel, currentCommand_.peakLevel);
-  const uint16_t colorCycleMs =
-    (currentCommand_.cycleMs == 0) ? 6000U : static_cast<uint16_t>(currentCommand_.cycleMs * 2U);
-  const uint8_t colorPhase = static_cast<uint8_t>(
-    (elapsedMs * 255UL) / colorCycleMs
-  );
-  const uint8_t tidePhase = static_cast<uint8_t>(
-    (elapsedMs * 255UL) / static_cast<uint32_t>(colorCycleMs * 3UL)
-  );
-  const uint8_t macroNoise = segmentNoise8(elapsedMs, static_cast<uint16_t>(colorCycleMs * 2U), 17U);
-  const CRGB primary = primaryColor(currentCommand_);
-  const CRGB secondary = secondaryColor(currentCommand_);
-  const CRGB driftColor = blend(
-    primary,
-    secondary,
-    ease8InOutCubic(colorPhase)
-  );
+void RgbStripRenderer::renderBarWave(uint32_t now) {
+  const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
+  const uint8_t phraseBars = (currentCommand_.triggerEveryBars == 0) ? 4U : currentCommand_.triggerEveryBars;
+  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
+  const uint32_t phraseDurationMs =
+    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar) * beatIntervalMs;
+  const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
+  const uint8_t startBeat =
+    (currentCommand_.triggerBeat == 0 || currentCommand_.triggerBeat > safeBeatsPerBar)
+      ? 1U
+      : currentCommand_.triggerBeat;
+  const uint32_t totalPhraseBeats =
+    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar);
+  const uint32_t absoluteBeatIndex =
+    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
+    static_cast<uint32_t>(safeBeatInBar - 1U);
+  const uint32_t phraseBeatIndex =
+    (absoluteBeatIndex + totalPhraseBeats - static_cast<uint32_t>(startBeat - 1U)) % totalPhraseBeats;
+  uint32_t elapsedBeatMs = now - beatStartedAtMs_;
+  if (elapsedBeatMs > beatIntervalMs) {
+    elapsedBeatMs = beatIntervalMs;
+  }
+
+  uint32_t elapsedPhraseMs = phraseBeatIndex * beatIntervalMs + elapsedBeatMs;
+  if (elapsedPhraseMs > phraseDurationMs) {
+    elapsedPhraseMs = phraseDurationMs;
+  }
+
+  const uint32_t travelMs = (currentCommand_.cycleMs == 0) ? (beatIntervalMs / 2U) : currentCommand_.cycleMs;
+  const WavePhaseLayout layout = barWaveLayout(currentCommand_, phraseDurationMs);
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
-    const uint8_t lanePhase = tidePhase + static_cast<uint8_t>(i * 19U);
-    const uint8_t tideMix = scale8(
-      wave8FromProgress(lanePhase),
-      static_cast<uint8_t>(74U + macroNoise / 4U)
-    );
-    uint16_t pixelLevel = level;
-    if (pixelLevel > 10U) {
-      pixelLevel -= 10U;
-    } else {
-      pixelLevel = 0U;
+    const uint32_t laneOffsetMs =
+      (kLedCount <= 1U) ? 0U : (travelMs * static_cast<uint32_t>(i)) / static_cast<uint32_t>(kLedCount - 1U);
+    uint32_t laneElapsedMs = elapsedPhraseMs + laneOffsetMs;
+    if (laneElapsedMs > phraseDurationMs) {
+      laneElapsedMs = phraseDurationMs;
     }
-    pixelLevel += scale8(tideMix, 24U);
-    pixelLevel += macroNoise / 20U;
-    gStripLeds[i] = scaleColor(
-      blend(driftColor, secondary, tideMix),
-      clampLevel(pixelLevel)
-    );
+    const uint8_t phase = static_cast<uint8_t>((laneElapsedMs * 255UL) / phraseDurationMs);
+    WavePixelState laneState = baseBarWaveState(currentCommand_, layout, phase);
+    applyBarWaveModulation(currentCommand_, layout, now, i, phase, laneState);
+    gStripLeds[i] = scaleColor(laneState.color, laneState.level);
   }
 }
 

@@ -12,6 +12,13 @@ class NodeOutput {
   void setRgbCommand(const decaflash::RgbCommand& command);
   void showRoleConfirm(decaflash::NodeEffect nodeEffect);
   void triggerRgbAccent();
+  void syncBeatClock(
+    uint32_t now,
+    uint32_t beatIntervalMs,
+    uint8_t beatsPerBar,
+    uint8_t beatInBar,
+    uint32_t currentBar
+  );
   void allOff();
   void flash100(uint16_t flashMs);
   void service(uint32_t now);

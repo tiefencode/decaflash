@@ -64,6 +64,18 @@ void NodeOutput::triggerRgbAccent() {
   }
 }
 
+void NodeOutput::syncBeatClock(
+  uint32_t now,
+  uint32_t beatIntervalMs,
+  uint8_t beatsPerBar,
+  uint8_t beatInBar,
+  uint32_t currentBar
+) {
+  if (nodeKind_ == decaflash::NodeKind::RgbStrip) {
+    rgbStrip_.syncBeatClock(now, beatIntervalMs, beatsPerBar, beatInBar, currentBar);
+  }
+}
+
 void NodeOutput::allOff() {
   if (!nodeKindInitialized_) {
     return;

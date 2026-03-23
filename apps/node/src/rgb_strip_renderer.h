@@ -14,11 +14,18 @@ class RgbStripRenderer {
   void setCommand(const decaflash::RgbCommand& command);
   void flash100(uint16_t flashMs);
   void triggerAccent();
+  void syncBeatClock(
+    uint32_t now,
+    uint32_t beatIntervalMs,
+    uint8_t beatsPerBar,
+    uint8_t beatInBar,
+    uint32_t currentBar
+  );
   void service(uint32_t now);
 
  private:
   void renderSolid(uint8_t red, uint8_t green, uint8_t blue);
-  void renderBreathe(uint32_t now);
+  void renderBarWave(uint32_t now);
   void renderBeatPulse(uint32_t now);
   void renderAccent(uint32_t now);
   void renderRunnerFlicker(uint32_t now);
@@ -31,6 +38,11 @@ class RgbStripRenderer {
   uint32_t effectStartedAtMs_ = 0;
   uint32_t accentStartedAtMs_ = 0;
   uint32_t accentEndsAtMs_ = 0;
+  uint32_t beatStartedAtMs_ = 0;
+  uint32_t beatIntervalMs_ = 500;
+  uint8_t beatsPerBar_ = 4;
+  uint8_t beatInBar_ = 1;
+  uint32_t currentBar_ = 1;
   bool initialized_ = false;
 
   static constexpr uint8_t kLedCount = 15;

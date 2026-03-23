@@ -29,7 +29,6 @@ enum class NodeEffect : uint8_t {
 enum class FlashPattern : uint8_t {
   Off = 0,
   PerBeat = 1,
-  Burst = 2,
 };
 
 enum class FlashLength : uint8_t {
@@ -37,16 +36,9 @@ enum class FlashLength : uint8_t {
   Long = 1,
 };
 
-enum class FlashCadence : uint8_t {
-  Hz2 = 0,
-  Hz3 = 1,
-  TightenSoft = 2,
-  TightenFast = 3,
-};
-
 enum class RgbPattern : uint8_t {
   Off = 0,
-  Breathe = 1,
+  BarWave = 1,
   BeatPulse = 2,
   Accent = 3,
   RunnerFlicker = 4,
@@ -58,9 +50,6 @@ struct FlashCommand {
   FlashLength length;
   uint8_t triggerEveryBars;
   uint8_t triggerBeat;
-  uint8_t burstCount;
-  FlashCadence cadence;
-  uint8_t reserved0;
 };
 
 struct RgbCommand {

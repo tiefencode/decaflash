@@ -14,52 +14,155 @@ struct SceneDefinition {
   RgbCommand flicker;
 };
 
-static constexpr SceneDefinition kScenes[] = {
-  {
-    "ruhig",
-    {"Quiet Pulse", FlashPattern::PerBeat, FlashLength::Long, 16, 1, 1, FlashCadence::Hz2, 0},
-    {"Quiet Accent", FlashPattern::Off, FlashLength::Long, 8, 4, 0, FlashCadence::Hz2, 0},
-    {"Quiet Wash", RgbPattern::Breathe, 0, 12, 64, 48, 0, 88, 5, 12, 30, 1, 0, 8800, 480},
-    {"Quiet Pulse", RgbPattern::BeatPulse, 0, 20, 96, 84, 0, 130, 6, 24, 72, 4, 1, 5400, 420},
-    {"Quiet Accent", RgbPattern::Accent, 10, 0, 0, 150, 0, 0, 0, 10, 96, 8, 4, 4200, 240},
-    {"Quiet Flicker", RgbPattern::RunnerFlicker, 0, 20, 80, 110, 0, 120, 4, 20, 68, 8, 4, 2800, 180},
-  },
-  {
-    "dynamisch",
-    {"Drive Pulse", FlashPattern::Burst, FlashLength::Short, 1, 1, 2, FlashCadence::Hz3, 0},
-    {"Drive Accent", FlashPattern::Burst, FlashLength::Short, 2, 3, 3, FlashCadence::Hz3, 0},
-    {"Drive Wash", RgbPattern::Breathe, 0, 40, 120, 72, 0, 120, 14, 34, 88, 1, 0, 2600, 240},
-    {"Drive Pulse", RgbPattern::BeatPulse, 0, 70, 180, 180, 0, 190, 16, 88, 220, 1, 0, 1100, 210},
-    {"Drive Accent", RgbPattern::Accent, 14, 0, 0, 255, 12, 0, 0, 22, 255, 2, 2, 1000, 170},
-    {"Drive Flicker", RgbPattern::RunnerFlicker, 0, 96, 210, 255, 0, 70, 12, 92, 230, 1, 1, 520, 110},
-  },
-  {
-    "balanciert",
-    {"Balanced Pulse", FlashPattern::PerBeat, FlashLength::Short, 2, 1, 1, FlashCadence::Hz3, 0},
-    {"Balanced Accent", FlashPattern::PerBeat, FlashLength::Long, 4, 3, 1, FlashCadence::Hz3, 0},
-    {"Balanced Wash", RgbPattern::Breathe, 0, 22, 92, 36, 0, 90, 8, 20, 44, 1, 0, 5200, 300},
-    {"Balanced Pulse", RgbPattern::BeatPulse, 0, 50, 150, 120, 0, 160, 10, 54, 160, 2, 1, 1900, 220},
-    {"Balanced Accent", RgbPattern::Accent, 12, 0, 0, 220, 0, 0, 0, 14, 180, 4, 3, 1700, 170},
-    {"Balanced Flicker", RgbPattern::RunnerFlicker, 0, 56, 150, 180, 0, 120, 8, 60, 180, 2, 2, 980, 140},
-  },
-  {
-    "melancholisch kalt",
-    {"Cold Pulse", FlashPattern::PerBeat, FlashLength::Long, 8, 1, 1, FlashCadence::Hz2, 0},
-    {"Cold Accent", FlashPattern::PerBeat, FlashLength::Short, 8, 4, 1, FlashCadence::Hz2, 0},
-    {"Cold Wash", RgbPattern::Breathe, 0, 12, 54, 0, 40, 92, 2, 8, 20, 1, 0, 9800, 520},
-    {"Cold Pulse", RgbPattern::BeatPulse, 0, 20, 88, 0, 58, 120, 4, 18, 58, 4, 3, 3400, 260},
-    {"Cold Accent", RgbPattern::Accent, 6, 0, 0, 120, 0, 0, 0, 8, 84, 8, 4, 2400, 190},
-    {"Cold Flicker", RgbPattern::RunnerFlicker, 0, 28, 96, 120, 0, 18, 2, 26, 92, 4, 4, 1650, 125},
-  },
-  {
-    "eskalation",
-    {"Rise Pulse", FlashPattern::Burst, FlashLength::Short, 1, 1, 5, FlashCadence::TightenFast, 0},
-    {"Rise Accent", FlashPattern::Burst, FlashLength::Short, 1, 3, 4, FlashCadence::TightenSoft, 0},
-    {"Rise Wash", RgbPattern::RunnerFlicker, 0, 80, 190, 140, 0, 170, 20, 72, 170, 1, 1, 720, 120},
-    {"Rise Pulse", RgbPattern::BeatPulse, 0, 110, 255, 255, 0, 220, 22, 120, 255, 1, 0, 680, 150},
-    {"Rise Accent", RgbPattern::Accent, 20, 0, 0, 255, 18, 0, 0, 28, 255, 1, 2, 920, 130},
-    {"Rise Flicker", RgbPattern::RunnerFlicker, 0, 120, 255, 255, 0, 0, 14, 120, 255, 1, 1, 300, 80},
-  },
+namespace detail {
+
+struct RgbColor {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+
+inline void copyCommandName(char* destination, const char* source) {
+  size_t index = 0;
+  while (source != nullptr && source[index] != '\0' && index + 1U < kCommandNameLength) {
+    destination[index] = source[index];
+    ++index;
+  }
+
+  while (index < kCommandNameLength) {
+    destination[index++] = '\0';
+  }
+}
+
+inline FlashCommand flashCommand(
+  const char* name,
+  FlashPattern pattern,
+  FlashLength length,
+  uint8_t everyBars,
+  uint8_t beat
+) {
+  FlashCommand command = {};
+  copyCommandName(command.name, name);
+  command.pattern = pattern;
+  command.length = length;
+  command.triggerEveryBars = everyBars;
+  command.triggerBeat = beat;
+  return command;
+}
+
+inline RgbCommand rgbCommand(
+  const char* name,
+  RgbPattern pattern,
+  RgbColor primary,
+  RgbColor secondary,
+  uint8_t floorLevel,
+  uint8_t baseLevel,
+  uint8_t peakLevel,
+  uint8_t everyBars,
+  uint8_t beat,
+  uint16_t cycleMs,
+  uint16_t accentDurationMs
+) {
+  RgbCommand command = {};
+  copyCommandName(command.name, name);
+  command.pattern = pattern;
+  command.primaryR = primary.r;
+  command.primaryG = primary.g;
+  command.primaryB = primary.b;
+  command.secondaryR = secondary.r;
+  command.secondaryG = secondary.g;
+  command.secondaryB = secondary.b;
+  command.floorLevel = floorLevel;
+  command.baseLevel = baseLevel;
+  command.peakLevel = peakLevel;
+  command.triggerEveryBars = everyBars;
+  command.triggerBeat = beat;
+  command.cycleMs = cycleMs;
+  command.accentDurationMs = accentDurationMs;
+  return command;
+}
+
+inline SceneDefinition makeScene1() {
+  constexpr RgbColor kDeepBlue = {0, 24, 110};
+  constexpr RgbColor kIceBlue = {92, 214, 255};
+  constexpr RgbColor kAccentBlue = {18, 120, 255};
+  constexpr RgbColor kWhite = {255, 255, 255};
+  constexpr uint8_t kWashFloor = 0;
+  constexpr uint8_t kWashBase = 18;
+  constexpr uint8_t kWashPeak = 170;
+  constexpr uint16_t kWashTravelMs = 620;
+  constexpr uint16_t kWashWhiteHoldMs = 120;
+
+  // Szene 1 startet mit einer langsamen 4-Takte-Welle:
+  // dunkel -> blau -> hellblau -> kurzes weiss -> wieder aus.
+  return {
+    "szene 1",
+
+    flashCommand("Scene 1 Pulse", FlashPattern::PerBeat, FlashLength::Long, 4, 1),
+    flashCommand("Scene 1 Accent", FlashPattern::Off, FlashLength::Long, 1, 1),
+
+    rgbCommand(
+      "Scene 1 Wash",
+      RgbPattern::BarWave,
+      kDeepBlue,
+      kIceBlue,
+      kWashFloor,
+      kWashBase,
+      kWashPeak,
+      4,
+      1,
+      kWashTravelMs,
+      kWashWhiteHoldMs
+    ),
+
+    rgbCommand(
+      "Scene 1 Pulse",
+      RgbPattern::BeatPulse,
+      kDeepBlue,
+      kIceBlue,
+      4,
+      18,
+      88,
+      1,
+      1,
+      2200,
+      240
+    ),
+
+    rgbCommand(
+      "Scene 1 Accent",
+      RgbPattern::Accent,
+      kDeepBlue,
+      kWhite,
+      0,
+      12,
+      190,
+      4,
+      4,
+      1800,
+      220
+    ),
+
+    rgbCommand(
+      "Scene 1 Flicker",
+      RgbPattern::RunnerFlicker,
+      kDeepBlue,
+      kAccentBlue,
+      2,
+      18,
+      96,
+      2,
+      2,
+      1400,
+      140
+    ),
+  };
+}
+
+}  // namespace detail
+
+static const SceneDefinition kScenes[] = {
+  detail::makeScene1(),
 };
 
 static constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
@@ -104,7 +207,7 @@ inline const RgbCommand& rgbSceneCommandFor(NodeEffect effect, size_t sceneIndex
   }
 }
 
-static constexpr FlashCommand kFlashReference = kScenes[0].flashPulse;
-static constexpr RgbCommand kPulseReference = kScenes[0].pulse;
+static const FlashCommand& kFlashReference = kScenes[0].flashPulse;
+static const RgbCommand& kPulseReference = kScenes[0].pulse;
 
 }  // namespace decaflash::scenes

@@ -11,7 +11,6 @@
 #include "protocol.h"
 
 using decaflash::DeviceType;
-using decaflash::FlashCadence;
 using decaflash::FlashCommand;
 using decaflash::FlashLength;
 using decaflash::FlashPattern;
@@ -62,9 +61,6 @@ static constexpr FlashCommand REMOTE_IDLE_FLASH_COMMAND = {
   FlashLength::Short,
   1,
   1,
-  1,
-  FlashCadence::Hz3,
-  0,
 };
 
 static constexpr RgbCommand REMOTE_IDLE_RGB_COMMAND = {
@@ -112,21 +108,9 @@ bool lastButtonLevel = HIGH;
 
 uint32_t nextBeatAtMs = 0;
 uint32_t beatIntervalMs = 0;
-uint32_t globalBeat = 0;
 uint32_t currentBar = 1;
 uint8_t beatInBar = 1;
 uint8_t beatsPerBar = DEFAULT_BEATS_PER_BAR;
-
-struct BurstState {
-  bool active = false;
-  uint8_t remaining = 0;
-  uint32_t intervalMs = 0;
-  uint32_t nextFlashAtMs = 0;
-  uint32_t flashDurationMs = 0;
-  int16_t intervalStepMs = 0;
-};
-
-BurstState burst;
 bool brainConnected = false;
 bool remoteControlActive = false;
 bool awaitingRemoteClock = false;
@@ -153,20 +137,6 @@ ClockSyncMessage pendingClockSyncMessage = {};
 BrainHelloMessage pendingBrainHelloMessage = {};
 
 void onBeat();
-
-NodeKind effectKind(NodeEffect nodeEffect) {
-  switch (nodeEffect) {
-    case NodeEffect::Wash:
-    case NodeEffect::Pulse:
-    case NodeEffect::Accent:
-    case NodeEffect::Flicker:
-      return NodeKind::RgbStrip;
-
-    case NodeEffect::None:
-    default:
-      return NodeKind::Flashlight;
-  }
-}
 
 NodeEffect defaultEffectFor(NodeKind nodeKind) {
   switch (nodeKind) {
@@ -445,8 +415,6 @@ bool wasSameBeatRenderedRecently(uint8_t beat, uint32_t bar, uint32_t now) {
 void applyFlashCommand(const FlashCommand& command) {
   activeFlashCommand = command;
   renderer.setFlashCommand(activeFlashCommand);
-  burst.active = false;
-  burst.remaining = 0;
   outputMuted = false;
   renderer.allOff();
 }
@@ -454,8 +422,6 @@ void applyFlashCommand(const FlashCommand& command) {
 void applyRgbCommand(const RgbCommand& command) {
   activeRgbCommand = command;
   renderer.setRgbCommand(activeRgbCommand);
-  burst.active = false;
-  burst.remaining = 0;
   outputMuted = false;
 }
 
@@ -471,14 +437,12 @@ void resetLocalClockState() {
   lastBeatRenderedAtMs = 0;
   lastRenderedBeatInBar = 0;
   lastRenderedBar = 0;
-  burst.active = false;
-  burst.remaining = 0;
-  globalBeat = 0;
   beatIntervalMs = bpmToIntervalMs(BPM);
   beatsPerBar = DEFAULT_BEATS_PER_BAR;
   beatInBar = 1;
   currentBar = 1;
   nextBeatAtMs = millis() + beatIntervalMs;
+  renderer.syncBeatClock(millis(), beatIntervalMs, beatsPerBar, beatInBar, currentBar);
 }
 
 void selectProgram(size_t programIndex, bool announce = true) {
@@ -640,8 +604,6 @@ void runBrainConnectSequence() {
   lastBrainActivityAtMs = millis();
   brainConnected = true;
   brainConnectSequenceShown = true;
-  burst.active = false;
-  burst.remaining = 0;
   renderer.allOff();
 
   for (uint8_t i = 0; i < BRAIN_CONNECT_FLASH_COUNT; ++i) {
@@ -988,61 +950,8 @@ void serviceButton() {
   }
 }
 
-uint32_t clampBurstInterval(int32_t intervalMs) {
-  if (intervalMs < 80) {
-    return 80;
-  }
-
-  return static_cast<uint32_t>(intervalMs);
-}
-
 uint32_t flashDurationMsFor(FlashLength length) {
   return (length == FlashLength::Long) ? 120U : 65U;
-}
-
-uint32_t cadenceIntervalMsFor(FlashCadence cadence) {
-  switch (cadence) {
-    case FlashCadence::Hz2:
-      return 500U;
-
-    case FlashCadence::Hz3:
-      return 333U;
-
-    case FlashCadence::TightenFast:
-      return 390U;
-
-    case FlashCadence::TightenSoft:
-    default:
-      return 290U;
-  }
-}
-
-int16_t cadenceStepMsFor(FlashCadence cadence) {
-  switch (cadence) {
-    case FlashCadence::TightenSoft:
-      return -15;
-
-    case FlashCadence::TightenFast:
-      return -35;
-
-    case FlashCadence::Hz2:
-    case FlashCadence::Hz3:
-    default:
-      return 0;
-  }
-}
-
-void startFlashBurst(const FlashCommand& command) {
-  if (command.burstCount == 0) {
-    return;
-  }
-
-  burst.active = true;
-  burst.remaining = command.burstCount;
-  burst.intervalMs = cadenceIntervalMsFor(command.cadence);
-  burst.nextFlashAtMs = millis();
-  burst.flashDurationMs = flashDurationMsFor(command.length);
-  burst.intervalStepMs = cadenceStepMsFor(command.cadence);
 }
 
 bool isTriggerBeat(uint8_t triggerEveryBars, uint8_t triggerBeat) {
@@ -1052,9 +961,11 @@ bool isTriggerBeat(uint8_t triggerEveryBars, uint8_t triggerBeat) {
 }
 
 void onBeat() {
-  lastBeatRenderedAtMs = millis();
+  const uint32_t now = millis();
+  lastBeatRenderedAtMs = now;
   lastRenderedBeatInBar = beatInBar;
   lastRenderedBar = currentBar;
+  renderer.syncBeatClock(now, beatIntervalMs, beatsPerBar, beatInBar, currentBar);
 
   if (!outputMuted) {
     if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
@@ -1067,12 +978,6 @@ void onBeat() {
         case FlashPattern::PerBeat:
           if (trigger) {
             renderer.flash100(flashDurationMsFor(activeFlashCommand.length));
-          }
-          break;
-
-        case FlashPattern::Burst:
-          if (trigger) {
-            startFlashBurst(activeFlashCommand);
           }
           break;
 
@@ -1090,7 +995,7 @@ void onBeat() {
           trigger = isTriggerBeat(activeRgbCommand.triggerEveryBars, activeRgbCommand.triggerBeat);
           break;
 
-        case RgbPattern::Breathe:
+        case RgbPattern::BarWave:
         case RgbPattern::Off:
         default:
           trigger = false;
@@ -1103,40 +1008,12 @@ void onBeat() {
     }
   }
 
-  globalBeat++;
   beatInBar++;
 
   if (beatInBar > beatsPerBar) {
     beatInBar = 1;
     currentBar++;
   }
-}
-
-void serviceBurst() {
-  if (nodeIdentity.nodeKind != NodeKind::Flashlight || outputMuted) {
-    return;
-  }
-
-  const uint32_t now = millis();
-  if (!burst.active || (int32_t)(now - burst.nextFlashAtMs) < 0) {
-    return;
-  }
-
-  renderer.flash100(static_cast<uint16_t>(burst.flashDurationMs));
-
-  if (burst.remaining > 0) {
-    burst.remaining--;
-  }
-
-  if (burst.remaining == 0) {
-    burst.active = false;
-    return;
-  }
-
-  burst.intervalMs = clampBurstInterval(
-    static_cast<int32_t>(burst.intervalMs) + burst.intervalStepMs
-  );
-  burst.nextFlashAtMs = millis() + burst.intervalMs;
 }
 
 void serviceClock() {
@@ -1355,7 +1232,6 @@ void loop() {
   processPendingRadio();
   serviceButton();
   serviceClock();
-  serviceBurst();
   serviceOutput();
   serviceNodeStatus();
 }

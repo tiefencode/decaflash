@@ -4,6 +4,8 @@
 #include "scene_programs.h"
 #include "decaflash_types.h"
 #include "espnow_transport.h"
+#include "matrix_meter.h"
+#include "matrix_ui.h"
 #include "pdm_microphone.h"
 #include "protocol.h"
 
@@ -115,20 +117,6 @@ struct PendingNodeStatusEvent {
 
 TrackedNode trackedNodes[kTrackedNodeCapacity];
 PendingNodeStatusEvent pendingNodeStatuses[kPendingNodeStatusCapacity];
-
-static constexpr uint8_t kDigitMasks[5][5] = {
-  {0b00100, 0b01100, 0b00100, 0b00100, 0b01110},  // 1
-  {0b01110, 0b00010, 0b01110, 0b01000, 0b01110},  // 2
-  {0b01110, 0b00010, 0b00110, 0b00010, 0b01110},  // 3
-  {0b01010, 0b01010, 0b01110, 0b00010, 0b00010},  // 4
-  {0b01110, 0b01000, 0b01110, 0b00010, 0b01110},  // 5
-};
-
-uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
-  return (static_cast<uint32_t>(r) << 16) |
-         (static_cast<uint32_t>(g) << 8) |
-         static_cast<uint32_t>(b);
-}
 
 uint32_t bpmToIntervalMs(uint16_t bpm) {
   return 60000UL / bpm;
@@ -550,87 +538,18 @@ void updateClockFromAudio(uint32_t now) {
     static_cast<int32_t>(nextBeatAtMs) + (phaseErrorMs / AUDIO_SYNC_SOFT_TRIM_DIVISOR));
 }
 
-void clearMatrix() {
-  for (uint8_t i = 0; i < 25; ++i) {
-    M5.dis.drawpix(i, 0x000000);
-  }
-}
-
-void drawSceneNumber(size_t sceneIndex) {
-  clearMatrix();
-
-  const uint8_t* rows = kDigitMasks[sceneIndex];
-  for (uint8_t y = 0; y < 5; ++y) {
-    for (uint8_t x = 0; x < 5; ++x) {
-      const bool on = (rows[y] >> (4 - x)) & 0x01;
-      M5.dis.drawpix(y * 5 + x, on ? color(255, 255, 255) : 0x000000);
-    }
-  }
-}
-
-uint32_t scenePixelColor(size_t sceneIndex, uint8_t x, uint8_t y) {
-  if (sceneIndex >= kSceneSlots || x > 4 || y > 4) {
-    return 0x000000;
-  }
-
-  const uint8_t* rows = kDigitMasks[sceneIndex];
-  const bool on = (rows[y] >> (4 - x)) & 0x01;
-  return on ? color(255, 255, 255) : 0x000000;
-}
-
-uint32_t beatDotColor() {
-  if (beatDotColorOverride != 0) {
-    return beatDotColorOverride;
-  }
-
-  return (beatDotBeat == 1) ? color(255, 0, 0) : color(255, 255, 255);
-}
-
-void drawBeatDotOverlay() {
-  M5.dis.drawpix(4, beatDotColor());
-}
-
 bool isSceneUiActive(uint32_t now) {
   return uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) < 0;
 }
 
 void updateBeatDotOverlay(uint32_t now) {
   if (brainLive && beatDotUntilMs != 0 && (int32_t)(now - beatDotUntilMs) < 0) {
-    drawBeatDotOverlay();
+    decaflash::brain::matrix::drawBeatDotOverlay(beatDotBeat, beatDotColorOverride);
     return;
   }
 
   if (isSceneUiActive(now)) {
-    M5.dis.drawpix(4, scenePixelColor(currentSceneIndex, 4, 0));
-  }
-}
-
-uint32_t meterColorForRow(uint8_t rowFromBottom) {
-  switch (rowFromBottom) {
-    case 0:
-    case 1:
-      return color(0, 110, 18);
-    case 2:
-      return color(130, 120, 0);
-    case 3:
-      return color(160, 60, 0);
-    default:
-      return color(180, 0, 0);
-  }
-}
-
-void drawMicrophoneMeter(uint8_t filledPixels) {
-  clearMatrix();
-
-  for (uint8_t slot = 0; slot < 25; ++slot) {
-    if (slot >= filledPixels) {
-      break;
-    }
-
-    const uint8_t rowFromBottom = slot / 5;
-    const uint8_t x = slot % 5;
-    const uint8_t y = 4 - rowFromBottom;
-    M5.dis.drawpix(y * 5 + x, meterColorForRow(rowFromBottom));
+    decaflash::brain::matrix::drawSceneCornerPixel(currentSceneIndex);
   }
 }
 
@@ -643,7 +562,7 @@ void updateIdleMatrixUi(uint32_t now) {
     return;
   }
 
-  drawMicrophoneMeter(microphone.meterLevel());
+  decaflash::brain::matrix::drawMicrophoneMeter(microphone.meterLevel());
   lastMeterDrawAtMs = now;
 }
 
@@ -651,7 +570,7 @@ void onBeat() {
   const uint8_t currentBeat = beatInBar;
 
   beatDotBeat = currentBeat;
-  beatDotColorOverride = syncBeatDotPending ? color(0, 90, 255) : 0;
+  beatDotColorOverride = syncBeatDotPending ? 0x005AFF : 0;
   syncBeatDotPending = false;
   beatDotUntilMs = millis() + BEAT_DOT_FLASH_MS;
 
@@ -772,7 +691,7 @@ void sendBrainHello() {
 }
 
 void showSceneUi() {
-  drawSceneNumber(currentSceneIndex);
+  decaflash::brain::matrix::drawSceneNumber(currentSceneIndex);
   uiFeedbackUntilMs = millis() + UI_SCENE_DISPLAY_MS;
   matrixOffAtMs = 0;
   Serial.printf("scene=%u name=%s bpm=%u\n",
@@ -810,7 +729,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   M5.begin(true, false, true);
-  clearMatrix();
+  decaflash::brain::matrix::clearMatrix();
 
   Serial.println();
   Serial.println("Decaflash Brain V1");
@@ -843,7 +762,7 @@ void setup() {
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
-  clearMatrix();
+  decaflash::brain::matrix::clearMatrix();
 
   if (espNowReady) {
     esp_now_register_recv_cb(onEspNowReceive);
@@ -874,11 +793,11 @@ void loop() {
 
   if (uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) >= 0) {
     uiFeedbackUntilMs = 0;
-    clearMatrix();
+    decaflash::brain::matrix::clearMatrix();
   }
 
   if (matrixOffAtMs != 0 && (int32_t)(now - matrixOffAtMs) >= 0) {
-    clearMatrix();
+    decaflash::brain::matrix::clearMatrix();
     matrixOffAtMs = 0;
   }
 
