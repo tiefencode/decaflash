@@ -4,7 +4,7 @@
 
 namespace decaflash::protocol {
 
-static constexpr uint16_t kProtocolVersion = 6;
+static constexpr uint16_t kProtocolVersion = 7;
 static constexpr uint32_t kProtocolMagic = 0x4443464C;  // DCFL
 
 enum class MessageType : uint8_t {
@@ -61,8 +61,6 @@ struct ClockSyncMessage {
 
 struct BrainHelloMessage {
   MessageHeader header;
-  uint32_t sessionId;
-  uint32_t helloRevision;
 };
 
 constexpr MessageHeader makeHeader(MessageType type) {
@@ -142,14 +140,9 @@ constexpr ClockSyncMessage makeClockSyncMessage(
   };
 }
 
-constexpr BrainHelloMessage makeBrainHelloMessage(
-  uint32_t sessionId,
-  uint32_t helloRevision
-) {
+constexpr BrainHelloMessage makeBrainHelloMessage() {
   return BrainHelloMessage{
     makeHeader(MessageType::BrainHello),
-    sessionId,
-    helloRevision,
   };
 }
 

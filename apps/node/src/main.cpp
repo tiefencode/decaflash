@@ -118,8 +118,6 @@ RunMode runMode = RunMode::Demo;
 uint32_t lastRemoteCommandRevision = 0;
 uint32_t lastClockRevision = 0;
 uint32_t lastClockBeatSerial = 0;
-uint32_t lastBrainSessionId = 0;
-uint32_t lastBrainHelloRevision = 0;
 uint32_t lastBeatRenderedAtMs = 0;
 uint8_t lastRenderedBeatInBar = 0;
 uint32_t lastRenderedBar = 0;
@@ -464,8 +462,6 @@ void resetDemoClockState() {
   lastRemoteCommandRevision = 0;
   lastClockRevision = 0;
   lastClockBeatSerial = 0;
-  lastBrainSessionId = 0;
-  lastBrainHelloRevision = 0;
   clearButtonGesture();
   resetBeatRenderHistory();
   beatIntervalMs = bpmToIntervalMs(BPM);
@@ -755,21 +751,8 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
 }
 
 void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
-  const bool sameBrainSession =
-    message.sessionId != 0 && message.sessionId == lastBrainSessionId;
-  if (sameBrainSession &&
-      message.helloRevision != 0 &&
-      message.helloRevision == lastBrainHelloRevision) {
-    return;
-  }
-
-  const bool newBrainSession =
-    message.sessionId == 0 || message.sessionId != lastBrainSessionId;
-  lastBrainSessionId = message.sessionId;
-  lastBrainHelloRevision = message.helloRevision;
-  if (newBrainSession) {
-    runBrainConnectSequence();
-  }
+  (void)message;
+  runBrainConnectSequence();
 
   if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
     applyFlashCommand(REMOTE_IDLE_FLASH_COMMAND);
