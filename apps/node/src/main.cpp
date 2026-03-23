@@ -141,8 +141,6 @@ bool brainConnectSequenceShown = false;
 uint32_t lastBeatRenderedAtMs = 0;
 uint8_t lastRenderedBeatInBar = 0;
 uint32_t lastRenderedBar = 0;
-uint8_t lastPrintedBeatInBar = 0;
-uint32_t lastPrintedBar = 0;
 
 portMUX_TYPE radioMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool hasPendingFlashCommand = false;
@@ -391,15 +389,17 @@ void sendNodeStatus(const char* reason) {
     sizeof(message)
   );
 
-  Serial.printf("send=node_status result=%d reason=%s kind=%s role=%s scene=",
-                result,
-                reason,
-                nodeKindName(nodeIdentity.nodeKind),
-                nodeEffectName(nodeIdentity.nodeEffect));
-  if (message.currentProgramIndex == 255) {
-    Serial.println("remote");
-  } else {
-    Serial.println(static_cast<unsigned>(message.currentProgramIndex + 1U));
+  if (result != ESP_OK || strcmp(reason, "heartbeat") != 0) {
+    Serial.printf("send=node_status result=%d reason=%s kind=%s role=%s scene=",
+                  result,
+                  reason,
+                  nodeKindName(nodeIdentity.nodeKind),
+                  nodeEffectName(nodeIdentity.nodeEffect));
+    if (message.currentProgramIndex == 255) {
+      Serial.println("remote");
+    } else {
+      Serial.println(static_cast<unsigned>(message.currentProgramIndex + 1U));
+    }
   }
 }
 
@@ -471,8 +471,6 @@ void resetLocalClockState() {
   lastBeatRenderedAtMs = 0;
   lastRenderedBeatInBar = 0;
   lastRenderedBar = 0;
-  lastPrintedBeatInBar = 0;
-  lastPrintedBar = 0;
   burst.active = false;
   burst.remaining = 0;
   globalBeat = 0;
@@ -758,10 +756,7 @@ void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
   remoteControlActive = true;
   awaitingRemoteClock = true;
   clockLocked = false;
-  Serial.println();
-  Serial.println("-----");
-  Serial.println("REMOTE: waiting for brain");
-  Serial.println("-----");
+  Serial.println("remote=waiting_for_brain");
   sendNodeStatus("brain_hello");
 }
 
@@ -787,14 +782,10 @@ void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
   awaitingRemoteClock = true;
   lastRemoteCommandRevision = message.commandRevision;
 
-  Serial.println();
-  Serial.println("-----");
-  Serial.printf("REMOTE: %s | %s | %s | %u BPM\n",
+  Serial.printf("remote=flash command=%s role=%s bpm=%u\n",
                 activeFlashCommand.name,
-                nodeKindName(nodeIdentity.nodeKind),
                 nodeEffectName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
-  Serial.println("-----");
   sendNodeStatus("remote_flash");
 }
 
@@ -820,14 +811,10 @@ void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
   awaitingRemoteClock = true;
   lastRemoteCommandRevision = message.commandRevision;
 
-  Serial.println();
-  Serial.println("-----");
-  Serial.printf("REMOTE: %s | %s | %s | %u BPM\n",
+  Serial.printf("remote=rgb command=%s role=%s bpm=%u\n",
                 activeRgbCommand.name,
-                nodeKindName(nodeIdentity.nodeKind),
                 nodeEffectName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
-  Serial.println("-----");
   sendNodeStatus("remote_rgb");
 }
 
@@ -1058,32 +1045,6 @@ void startFlashBurst(const FlashCommand& command) {
   burst.intervalStepMs = cadenceStepMsFor(command.cadence);
 }
 
-void printBurstLine(uint8_t count) {
-  for (uint8_t i = 0; i < count; ++i) {
-    if (i > 0) {
-      Serial.print(" ");
-    }
-
-    Serial.print("FLASH");
-  }
-
-  Serial.println();
-}
-
-void printBeatSummary(const char* label) {
-  if (lastPrintedBeatInBar == beatInBar && lastPrintedBar == currentBar) {
-    return;
-  }
-
-  lastPrintedBeatInBar = beatInBar;
-  lastPrintedBar = currentBar;
-  Serial.println(label);
-
-  if ((beatInBar + 1) > beatsPerBar) {
-    Serial.println();
-  }
-}
-
 bool isTriggerBeat(uint8_t triggerEveryBars, uint8_t triggerBeat) {
   const bool isTriggerBar =
     (triggerEveryBars <= 1) || ((currentBar % triggerEveryBars) == 0);
@@ -1104,14 +1065,12 @@ void onBeat() {
 
       switch (activeFlashCommand.pattern) {
         case FlashPattern::PerBeat:
-          printBeatSummary(trigger ? "FLASH" : "-");
           if (trigger) {
             renderer.flash100(flashDurationMsFor(activeFlashCommand.length));
           }
           break;
 
         case FlashPattern::Burst:
-          printBeatSummary(trigger ? "BURST" : "-");
           if (trigger) {
             startFlashBurst(activeFlashCommand);
           }
@@ -1119,7 +1078,6 @@ void onBeat() {
 
         case FlashPattern::Off:
         default:
-          printBeatSummary("-");
           renderer.allOff();
           break;
       }
@@ -1139,7 +1097,6 @@ void onBeat() {
           break;
       }
 
-      printBeatSummary(trigger ? "LIFT" : "-");
       if (trigger) {
         renderer.triggerRgbAccent();
       }

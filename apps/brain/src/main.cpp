@@ -31,7 +31,8 @@ static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
 static constexpr uint32_t METER_REFRESH_MS = 40;
-static constexpr uint32_t DEBUG_STATUS_INTERVAL_MS = 1000;
+static constexpr uint32_t BPM_FOLLOW_LOG_INTERVAL_MS = 15000;
+static constexpr uint8_t BPM_FOLLOW_LOG_DELTA = 4;
 static constexpr uint32_t UI_SCENE_DISPLAY_MS = 3000;
 static constexpr uint16_t MIN_BPM = 60;
 static constexpr uint16_t MAX_BPM = 180;
@@ -94,7 +95,8 @@ uint8_t audioSyncPhaseMissCount = 0;
 uint32_t lastAudioOnsetSeenAtMs = 0;
 uint32_t lastAudioOnsetHandledAtMs = 0;
 uint32_t lastAudioLockAtMs = 0;
-uint32_t lastDebugStatusAtMs = 0;
+uint32_t lastBpmFollowLogAtMs = 0;
+uint16_t lastLoggedFollowBpm = DEFAULT_BPM;
 decaflash::brain::PdmMicrophone microphone;
 portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -232,18 +234,11 @@ void printTrackedNode(const TrackedNode& node, const char* eventLabel) {
   char macBuffer[18] = {};
   formatMac(node.mac, macBuffer, sizeof(macBuffer));
 
-  Serial.printf("node=%s mac=%s kind=%s role=%s bpm=%u scene=",
+  Serial.printf("node=%s mac=%s kind=%s role=%s\n",
                 eventLabel,
                 macBuffer,
                 nodeKindName(node.status.identity.nodeKind),
-                nodeRoleName(node.status.identity.nodeEffect),
-                static_cast<unsigned>(node.status.currentBpm));
-  if (node.status.currentProgramIndex == 255) {
-    Serial.print("remote");
-  } else {
-    Serial.print(static_cast<unsigned>(node.status.currentProgramIndex + 1U));
-  }
-  Serial.printf(" uptime=%lu\n", static_cast<unsigned long>(node.status.uptimeMs));
+                nodeRoleName(node.status.identity.nodeEffect));
 }
 
 void processPendingNodeStatuses(uint32_t now) {
@@ -287,14 +282,11 @@ void processPendingNodeStatuses(uint32_t now) {
     }
 
     const bool wasActive = slot->active;
-    const bool changed =
+    const bool identityChanged =
       !wasActive ||
       memcmp(slot->mac, event.mac, sizeof(slot->mac)) != 0 ||
       slot->status.identity.nodeKind != event.status.identity.nodeKind ||
-      slot->status.identity.nodeEffect != event.status.identity.nodeEffect ||
-      slot->status.currentBpm != event.status.currentBpm ||
-      slot->status.beatsPerBar != event.status.beatsPerBar ||
-      slot->status.currentProgramIndex != event.status.currentProgramIndex;
+      slot->status.identity.nodeEffect != event.status.identity.nodeEffect;
 
     slot->active = true;
     memcpy(slot->mac, event.mac, sizeof(slot->mac));
@@ -304,8 +296,8 @@ void processPendingNodeStatuses(uint32_t now) {
     if (!wasActive) {
       printTrackedNode(*slot, "seen");
       pendingCommandRefresh = true;
-    } else if (changed) {
-      printTrackedNode(*slot, "update");
+    } else if (identityChanged) {
+      printTrackedNode(*slot, "role");
       pendingCommandRefresh = true;
     }
   }
@@ -324,6 +316,17 @@ void expireTrackedNodes(uint32_t now) {
     printTrackedNode(trackedNode, "lost");
     trackedNode.active = false;
   }
+}
+
+size_t activeNodeCount() {
+  size_t count = 0;
+  for (const auto& trackedNode : trackedNodes) {
+    if (trackedNode.active) {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 void resetAudioClockFollow() {
@@ -354,7 +357,16 @@ void setClockBpm(uint16_t bpm, const char* source) {
   currentBpm = clampedBpm;
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   clockRevision++;
-  Serial.printf("clock=bpm source=%s bpm=%u\n", source, static_cast<unsigned>(currentBpm));
+
+  const uint32_t now = millis();
+  const bool isFollow = strcmp(source, "audio_follow") == 0;
+  if (!isFollow ||
+      bpmDifference(currentBpm, lastLoggedFollowBpm) >= BPM_FOLLOW_LOG_DELTA ||
+      (now - lastBpmFollowLogAtMs) >= BPM_FOLLOW_LOG_INTERVAL_MS) {
+    Serial.printf("bpm=%u source=%s\n", static_cast<unsigned>(currentBpm), source);
+    lastLoggedFollowBpm = currentBpm;
+    lastBpmFollowLogAtMs = now;
+  }
 }
 
 void updateClockFromAudio(uint32_t now) {
@@ -635,23 +647,6 @@ void updateIdleMatrixUi(uint32_t now) {
   lastMeterDrawAtMs = now;
 }
 
-void printCompactAudioDebug(uint32_t now) {
-  if ((now - lastDebugStatusAtMs) < DEBUG_STATUS_INTERVAL_MS) {
-    return;
-  }
-
-  lastDebugStatusAtMs = now;
-  Serial.printf("debug music=%u raw=%u audio=%u clock=%u conf=%u lock=%u meter=%u live=%u\n",
-                static_cast<unsigned>(microphone.musicPresent()),
-                static_cast<unsigned>(microphone.detectedBpm()),
-                static_cast<unsigned>(microphone.clockBpm()),
-                static_cast<unsigned>(currentBpm),
-                static_cast<unsigned>(microphone.beatConfidence()),
-                static_cast<unsigned>(audioClockLocked),
-                static_cast<unsigned>(microphone.meterLevel()),
-                static_cast<unsigned>(brainLive));
-}
-
 void onBeat() {
   const uint8_t currentBeat = beatInBar;
 
@@ -709,12 +704,13 @@ void sendFlashCommand(NodeEffect targetNodeEffect, const decaflash::FlashCommand
     sizeof(message)
   );
 
-  Serial.printf("send=flash_command result=%d role=%s scene=%u name=%s command=%s\n",
-                result,
-                nodeRoleName(targetNodeEffect),
-                static_cast<unsigned>(currentSceneIndex + 1),
-                sceneName(currentSceneIndex),
-                message.command.name);
+  if (result != ESP_OK) {
+    Serial.printf("send=flash_command result=%d role=%s scene=%u command=%s\n",
+                  result,
+                  nodeRoleName(targetNodeEffect),
+                  static_cast<unsigned>(currentSceneIndex + 1),
+                  message.command.name);
+  }
 }
 
 void sendRgbCommand(NodeEffect targetNodeEffect, const decaflash::RgbCommand& command) {
@@ -735,15 +731,20 @@ void sendRgbCommand(NodeEffect targetNodeEffect, const decaflash::RgbCommand& co
     sizeof(message)
   );
 
-  Serial.printf("send=rgb_command result=%d role=%s scene=%u name=%s command=%s\n",
-                result,
-                nodeRoleName(targetNodeEffect),
-                static_cast<unsigned>(currentSceneIndex + 1),
-                sceneName(currentSceneIndex),
-                message.command.name);
+  if (result != ESP_OK) {
+    Serial.printf("send=rgb_command result=%d role=%s scene=%u command=%s\n",
+                  result,
+                  nodeRoleName(targetNodeEffect),
+                  static_cast<unsigned>(currentSceneIndex + 1),
+                  message.command.name);
+  }
 }
 
 void sendCurrentCommands() {
+  if (!espNowReady || !brainLive) {
+    return;
+  }
+
   for (const auto effect : kFlashEffects) {
     sendFlashCommand(effect, flashSceneCommandFor(effect, currentSceneIndex));
   }
@@ -765,16 +766,19 @@ void sendBrainHello() {
     sizeof(message)
   );
 
-  Serial.printf("send=brain_hello result=%d\n", result);
+  if (result != ESP_OK) {
+    Serial.printf("send=brain_hello result=%d\n", result);
+  }
 }
 
 void showSceneUi() {
   drawSceneNumber(currentSceneIndex);
   uiFeedbackUntilMs = millis() + UI_SCENE_DISPLAY_MS;
   matrixOffAtMs = 0;
-  Serial.printf("scene=%u name=%s\n",
+  Serial.printf("scene=%u name=%s bpm=%u\n",
                 static_cast<unsigned>(currentSceneIndex + 1),
-                sceneName(currentSceneIndex));
+                sceneName(currentSceneIndex),
+                static_cast<unsigned>(currentBpm));
 }
 
 void selectNextScene() {
@@ -797,7 +801,9 @@ void activateBrain() {
   showSceneUi();
   sendCurrentCommands();
   nextSendAtMs = millis() + COMMAND_REFRESH_MS;
-  Serial.println("brain=live");
+  Serial.printf("brain=live scene=%u bpm=%u\n",
+                static_cast<unsigned>(currentSceneIndex + 1U),
+                static_cast<unsigned>(currentBpm));
 }
 
 void setup() {
@@ -882,8 +888,6 @@ void loop() {
   }
 
   updateClockFromAudio(now);
-  printCompactAudioDebug(now);
-
   while (brainLive && (int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();
     nextBeatAtMs += beatIntervalMs;
