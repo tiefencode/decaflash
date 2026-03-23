@@ -1,15 +1,17 @@
 #include "flashlight_renderer.h"
 
-FlashlightRenderer::FlashlightRenderer(int flashPin) : flashPin_(flashPin) {}
-
 void FlashlightRenderer::begin() {
-  pinMode(flashPin_, OUTPUT);
+  pinMode(kFlashPin, OUTPUT);
   allOff();
 }
 
 void FlashlightRenderer::allOff() {
-  digitalWrite(flashPin_, LOW);
+  digitalWrite(kFlashPin, LOW);
   delay(8);
+}
+
+void FlashlightRenderer::setCommand(const decaflash::NodeCommand& command) {
+  (void)command;
 }
 
 void FlashlightRenderer::flash100(uint16_t flashMs) {
@@ -22,9 +24,9 @@ void FlashlightRenderer::sendFlashPreset(uint8_t preset) {
   allOff();
 
   for (uint8_t i = 0; i < preset; ++i) {
-    digitalWrite(flashPin_, LOW);
+    digitalWrite(kFlashPin, LOW);
     delayMicroseconds(4);
-    digitalWrite(flashPin_, HIGH);
+    digitalWrite(kFlashPin, HIGH);
     delayMicroseconds(4);
   }
 }

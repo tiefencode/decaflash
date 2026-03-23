@@ -4,7 +4,20 @@
 
 namespace decaflash::node {
 
-static constexpr const NodeCommand* kPrograms = decaflash::examples::kFlashCommands;
-static constexpr size_t kProgramCount = decaflash::examples::kFlashCommandCount;
+struct ProgramSet {
+  const NodeCommand* programs;
+  size_t count;
+};
+
+inline ProgramSet programSetFor(NodeKind nodeKind) {
+  switch (nodeKind) {
+    case NodeKind::RgbStrip:
+      return {decaflash::examples::kRgbCommands, decaflash::examples::kRgbCommandCount};
+
+    case NodeKind::Flashlight:
+    default:
+      return {decaflash::examples::kFlashCommands, decaflash::examples::kFlashCommandCount};
+  }
+}
 
 }  // namespace decaflash::node

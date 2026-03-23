@@ -11,14 +11,19 @@ using decaflash::DeviceType;
 using decaflash::examples::kFlashCommandCount;
 using decaflash::examples::kFlashCommands;
 using decaflash::examples::kFlashQuadSkip;
+using decaflash::examples::kRgbCommandCount;
+using decaflash::examples::kRgbCommands;
 using decaflash::espnow_transport::ensureBroadcastPeer;
 using decaflash::espnow_transport::initEspNow;
+using decaflash::espnow_transport::isValidHeader;
 using decaflash::protocol::makeBrainHelloMessage;
 using decaflash::protocol::makeClockSyncMessage;
 using decaflash::protocol::makeNodeCommandMessage;
+using decaflash::protocol::NodeStatusMessage;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
 static constexpr uint32_t COMMAND_REFRESH_MS = 10000;
+static constexpr uint32_t NODE_STALE_MS = 15000;
 static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
@@ -45,6 +50,10 @@ static constexpr uint8_t AUDIO_SYNC_SOFT_TRIM_DIVISOR = 3;
 static constexpr uint8_t AUDIO_SYNC_PRE_RESYNC_TRIM_DIVISOR = 2;
 static constexpr uint8_t AUDIO_SYNC_FOLLOW_REQUIRED_UPDATES = 2;
 static constexpr uint8_t AUDIO_SYNC_RESYNC_REQUIRED_HITS = 2;
+static constexpr size_t kModeCount = kFlashCommandCount;
+static constexpr size_t kTrackedNodeCapacity = 8;
+static constexpr size_t kPendingNodeStatusCapacity = 6;
+static_assert(kFlashCommandCount == kRgbCommandCount, "brain mode tables must stay aligned");
 uint32_t nextSendAtMs = 0;
 bool espNowReady = false;
 bool brainLive = false;
@@ -83,6 +92,23 @@ uint32_t lastAudioOnsetHandledAtMs = 0;
 uint32_t lastAudioLockAtMs = 0;
 uint32_t lastDebugStatusAtMs = 0;
 decaflash::brain::PdmMicrophone microphone;
+portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
+
+struct TrackedNode {
+  bool active = false;
+  uint8_t mac[6] = {};
+  NodeStatusMessage status = {};
+  uint32_t lastSeenAtMs = 0;
+};
+
+struct PendingNodeStatusEvent {
+  bool ready = false;
+  uint8_t mac[6] = {};
+  NodeStatusMessage status = {};
+};
+
+TrackedNode trackedNodes[kTrackedNodeCapacity];
+PendingNodeStatusEvent pendingNodeStatuses[kPendingNodeStatusCapacity];
 
 static constexpr uint8_t kDigitMasks[5][5] = {
   {0b00100, 0b01100, 0b00100, 0b00100, 0b01110},  // 1
@@ -116,6 +142,160 @@ uint16_t clampBpm(uint16_t bpm) {
 
 uint16_t bpmDifference(uint16_t left, uint16_t right) {
   return (left > right) ? (left - right) : (right - left);
+}
+
+const char* nodeKindName(decaflash::NodeKind nodeKind) {
+  switch (nodeKind) {
+    case decaflash::NodeKind::RgbStrip:
+      return "rgb";
+
+    case decaflash::NodeKind::Flashlight:
+    default:
+      return "flash";
+  }
+}
+
+void formatMac(const uint8_t* mac, char* buffer, size_t bufferLength) {
+  snprintf(buffer,
+           bufferLength,
+           "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0],
+           mac[1],
+           mac[2],
+           mac[3],
+           mac[4],
+           mac[5]);
+}
+
+void queueNodeStatus(const uint8_t* mac, const NodeStatusMessage& status) {
+  portENTER_CRITICAL(&nodeStatusMux);
+  size_t slotIndex = 0;
+  bool foundFreeSlot = false;
+
+  for (size_t i = 0; i < kPendingNodeStatusCapacity; ++i) {
+    if (!pendingNodeStatuses[i].ready) {
+      slotIndex = i;
+      foundFreeSlot = true;
+      break;
+    }
+  }
+
+  if (!foundFreeSlot) {
+    slotIndex = 0;
+  }
+
+  pendingNodeStatuses[slotIndex].ready = true;
+  memcpy(pendingNodeStatuses[slotIndex].mac, mac, sizeof(pendingNodeStatuses[slotIndex].mac));
+  pendingNodeStatuses[slotIndex].status = status;
+  portEXIT_CRITICAL(&nodeStatusMux);
+}
+
+void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
+  if (len != static_cast<int>(sizeof(NodeStatusMessage))) {
+    return;
+  }
+
+  NodeStatusMessage status = {};
+  memcpy(&status, data, sizeof(status));
+  if (!isValidHeader(status.header, decaflash::protocol::MessageType::NodeStatus)) {
+    return;
+  }
+
+  queueNodeStatus(mac, status);
+}
+
+void printTrackedNode(const TrackedNode& node, const char* eventLabel) {
+  char macBuffer[18] = {};
+  formatMac(node.mac, macBuffer, sizeof(macBuffer));
+
+  Serial.printf("node=%s mac=%s kind=%s bpm=%u program=",
+                eventLabel,
+                macBuffer,
+                nodeKindName(node.status.identity.nodeKind),
+                static_cast<unsigned>(node.status.currentBpm));
+  if (node.status.currentProgramIndex == 255) {
+    Serial.print("remote");
+  } else {
+    Serial.print(static_cast<unsigned>(node.status.currentProgramIndex + 1U));
+  }
+  Serial.printf(" uptime=%lu\n", static_cast<unsigned long>(node.status.uptimeMs));
+}
+
+void processPendingNodeStatuses(uint32_t now) {
+  PendingNodeStatusEvent localEvents[kPendingNodeStatusCapacity];
+  size_t localEventCount = 0;
+
+  portENTER_CRITICAL(&nodeStatusMux);
+  for (size_t i = 0; i < kPendingNodeStatusCapacity; ++i) {
+    if (!pendingNodeStatuses[i].ready) {
+      continue;
+    }
+
+    localEvents[localEventCount++] = pendingNodeStatuses[i];
+    pendingNodeStatuses[i].ready = false;
+  }
+  portEXIT_CRITICAL(&nodeStatusMux);
+
+  for (size_t eventIndex = 0; eventIndex < localEventCount; ++eventIndex) {
+    const auto& event = localEvents[eventIndex];
+    TrackedNode* slot = nullptr;
+    TrackedNode* reusableSlot = nullptr;
+
+    for (auto& trackedNode : trackedNodes) {
+      if (trackedNode.active &&
+          memcmp(trackedNode.mac, event.mac, sizeof(trackedNode.mac)) == 0) {
+        slot = &trackedNode;
+        break;
+      }
+
+      if (!trackedNode.active && reusableSlot == nullptr) {
+        reusableSlot = &trackedNode;
+      }
+    }
+
+    if (slot == nullptr) {
+      slot = reusableSlot;
+    }
+
+    if (slot == nullptr) {
+      slot = &trackedNodes[0];
+    }
+
+    const bool wasActive = slot->active;
+    const bool changed =
+      !wasActive ||
+      memcmp(slot->mac, event.mac, sizeof(slot->mac)) != 0 ||
+      slot->status.identity.nodeKind != event.status.identity.nodeKind ||
+      slot->status.currentBpm != event.status.currentBpm ||
+      slot->status.beatsPerBar != event.status.beatsPerBar ||
+      slot->status.currentProgramIndex != event.status.currentProgramIndex;
+
+    slot->active = true;
+    memcpy(slot->mac, event.mac, sizeof(slot->mac));
+    slot->status = event.status;
+    slot->lastSeenAtMs = now;
+
+    if (!wasActive) {
+      printTrackedNode(*slot, "seen");
+    } else if (changed) {
+      printTrackedNode(*slot, "update");
+    }
+  }
+}
+
+void expireTrackedNodes(uint32_t now) {
+  for (auto& trackedNode : trackedNodes) {
+    if (!trackedNode.active) {
+      continue;
+    }
+
+    if ((now - trackedNode.lastSeenAtMs) < NODE_STALE_MS) {
+      continue;
+    }
+
+    printTrackedNode(trackedNode, "lost");
+    trackedNode.active = false;
+  }
 }
 
 void resetAudioClockFollow() {
@@ -486,13 +666,13 @@ void onBeat() {
   }
 }
 
-void sendCommand(const decaflash::NodeCommand& command) {
+void sendCommand(decaflash::NodeKind targetNodeKind, const decaflash::NodeCommand& command) {
   if (!espNowReady || !brainLive) {
     return;
   }
 
   const auto message = makeNodeCommandMessage(
-    decaflash::NodeKind::Flashlight,
+    targetNodeKind,
     command,
     commandRevision
   );
@@ -503,14 +683,16 @@ void sendCommand(const decaflash::NodeCommand& command) {
     sizeof(message)
   );
 
-  Serial.printf("send=node_command result=%d mode=%u command=%s\n",
+  Serial.printf("send=node_command result=%d target=%u mode=%u command=%s\n",
                 result,
+                static_cast<unsigned>(targetNodeKind),
                 static_cast<unsigned>(currentModeIndex + 1),
                 message.command.name);
 }
 
-void sendCurrentCommand() {
-  sendCommand(kFlashCommands[currentModeIndex]);
+void sendCurrentCommands() {
+  sendCommand(decaflash::NodeKind::Flashlight, kFlashCommands[currentModeIndex]);
+  sendCommand(decaflash::NodeKind::RgbStrip, kRgbCommands[currentModeIndex]);
 }
 
 void sendBrainHello() {
@@ -557,10 +739,10 @@ void updateBpmFromTapTempo() {
 }
 
 void selectNextMode() {
-  currentModeIndex = (currentModeIndex + 1) % kFlashCommandCount;
+  currentModeIndex = (currentModeIndex + 1) % kModeCount;
   commandRevision++;
   showModeUi();
-  sendCurrentCommand();
+  sendCurrentCommands();
 }
 
 void activateBrain() {
@@ -573,7 +755,7 @@ void activateBrain() {
   nextBeatAtMs = millis() + beatIntervalMs;
   commandRevision++;
   showModeUi();
-  sendCurrentCommand();
+  sendCurrentCommands();
   nextSendAtMs = millis() + COMMAND_REFRESH_MS;
   Serial.println("brain=live");
 }
@@ -633,12 +815,14 @@ void setup() {
   Serial.printf("add_peer=%d\n", static_cast<int>(peerResult.addPeer));
   Serial.printf("mode=%s\n", espNowReady ? "silent start" : "startup only");
   Serial.println("button=single tap start/next mode | multi tap bpm");
+  Serial.println("node_discovery=esp-now node status receive");
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
   clearMatrix();
 
   if (espNowReady) {
+    esp_now_register_recv_cb(onEspNowReceive);
     sendBrainHello();
   }
 }
@@ -647,6 +831,8 @@ void loop() {
   M5.update();
   const uint32_t now = millis();
   microphone.update();
+  processPendingNodeStatuses(now);
+  expireTrackedNodes(now);
 
   if (M5.Btn.wasPressed()) {
     registerTap();
@@ -690,7 +876,7 @@ void loop() {
   }
 
   if (brainLive && (int32_t)(now - nextSendAtMs) >= 0) {
-    sendCurrentCommand();
+    sendCurrentCommands();
     nextSendAtMs += COMMAND_REFRESH_MS;
   }
 
