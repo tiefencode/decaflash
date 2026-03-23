@@ -27,14 +27,11 @@ static constexpr uint32_t NODE_STALE_MS = 15000;
 static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
-static constexpr uint16_t TAP_FLASH_MS = 50;
 static constexpr uint32_t METER_REFRESH_MS = 40;
 static constexpr uint32_t DEBUG_STATUS_INTERVAL_MS = 1000;
 static constexpr uint32_t UI_MODE_DISPLAY_MS = 3000;
-static constexpr uint32_t BUTTON_TAP_WINDOW_MS = 450;
-static constexpr uint32_t TAP_TEMPO_TIMEOUT_MS = 1600;
-static constexpr uint16_t TAP_TEMPO_MIN_BPM = 60;
-static constexpr uint16_t TAP_TEMPO_MAX_BPM = 180;
+static constexpr uint16_t MIN_BPM = 60;
+static constexpr uint16_t MAX_BPM = 180;
 static constexpr uint8_t AUDIO_SYNC_CANDIDATE_CONFIDENCE = 68;
 static constexpr uint8_t AUDIO_SYNC_LOCKED_CONFIDENCE = 62;
 static constexpr uint8_t AUDIO_SYNC_REQUIRED_ONSETS = 3;
@@ -68,17 +65,11 @@ uint8_t beatInBar = 1;
 uint32_t currentBar = 1;
 uint32_t matrixOffAtMs = 0;
 uint32_t uiFeedbackUntilMs = 0;
-uint32_t tapTempoUiUntilMs = 0;
 uint32_t beatDotUntilMs = 0;
 uint8_t beatDotBeat = 0;
 uint32_t beatDotColorOverride = 0;
 bool syncBeatDotPending = false;
 size_t currentModeIndex = 0;
-bool pendingSingleTap = false;
-uint32_t pendingSingleTapAtMs = 0;
-uint32_t lastTapAtMs = 0;
-uint32_t tapIntervalsMs[3] = {0, 0, 0};
-uint8_t tapIntervalCount = 0;
 uint32_t lastMeterDrawAtMs = 0;
 bool audioClockLocked = false;
 uint8_t audioSyncCandidateCount = 0;
@@ -129,12 +120,12 @@ uint32_t bpmToIntervalMs(uint16_t bpm) {
 }
 
 uint16_t clampBpm(uint16_t bpm) {
-  if (bpm < TAP_TEMPO_MIN_BPM) {
-    return TAP_TEMPO_MIN_BPM;
+  if (bpm < MIN_BPM) {
+    return MIN_BPM;
   }
 
-  if (bpm > TAP_TEMPO_MAX_BPM) {
-    return TAP_TEMPO_MAX_BPM;
+  if (bpm > MAX_BPM) {
+    return MAX_BPM;
   }
 
   return bpm;
@@ -510,18 +501,6 @@ void updateClockFromAudio(uint32_t now) {
     static_cast<int32_t>(nextBeatAtMs) + (phaseErrorMs / AUDIO_SYNC_SOFT_TRIM_DIVISOR));
 }
 
-void resetTapTempoSequence() {
-  pendingSingleTap = false;
-  pendingSingleTapAtMs = 0;
-  lastTapAtMs = 0;
-  tapIntervalCount = 0;
-  tapTempoUiUntilMs = 0;
-
-  for (auto& interval : tapIntervalsMs) {
-    interval = 0;
-  }
-}
-
 void clearMatrix() {
   for (uint8_t i = 0; i < 25; ++i) {
     M5.dis.drawpix(i, 0x000000);
@@ -540,6 +519,16 @@ void drawModeNumber(size_t modeIndex) {
   }
 }
 
+uint32_t modePixelColor(size_t modeIndex, uint8_t x, uint8_t y) {
+  if (modeIndex >= kModeCount || x > 4 || y > 4) {
+    return 0x000000;
+  }
+
+  const uint8_t* rows = kDigitMasks[modeIndex];
+  const bool on = (rows[y] >> (4 - x)) & 0x01;
+  return on ? color(255, 255, 255) : 0x000000;
+}
+
 uint32_t beatDotColor() {
   if (beatDotColorOverride != 0) {
     return beatDotColorOverride;
@@ -552,20 +541,19 @@ void drawBeatDotOverlay() {
   M5.dis.drawpix(4, beatDotColor());
 }
 
+bool isModeUiActive(uint32_t now) {
+  return uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) < 0;
+}
+
 void updateBeatDotOverlay(uint32_t now) {
-  if (!brainLive || beatDotUntilMs == 0 || (int32_t)(now - beatDotUntilMs) >= 0) {
+  if (brainLive && beatDotUntilMs != 0 && (int32_t)(now - beatDotUntilMs) < 0) {
+    drawBeatDotOverlay();
     return;
   }
 
-  drawBeatDotOverlay();
-}
-
-void drawTapTempoFlash() {
-  for (uint8_t i = 0; i < 25; ++i) {
-    M5.dis.drawpix(i, color(255, 90, 0));
+  if (isModeUiActive(now)) {
+    M5.dis.drawpix(4, modePixelColor(currentModeIndex, 4, 0));
   }
-
-  matrixOffAtMs = millis() + TAP_FLASH_MS;
 }
 
 uint32_t meterColorForRow(uint8_t rowFromBottom) {
@@ -598,7 +586,7 @@ void drawMicrophoneMeter(uint8_t filledPixels) {
 }
 
 void updateIdleMatrixUi(uint32_t now) {
-  if (uiFeedbackUntilMs != 0 || tapTempoUiUntilMs != 0 || matrixOffAtMs != 0) {
+  if (isModeUiActive(now) || matrixOffAtMs != 0) {
     return;
   }
 
@@ -717,27 +705,6 @@ void showModeUi() {
   Serial.printf("mode=%u\n", static_cast<unsigned>(currentModeIndex + 1));
 }
 
-void updateBpmFromTapTempo() {
-  if (tapIntervalCount == 0) {
-    return;
-  }
-
-  uint32_t totalIntervalMs = 0;
-  for (uint8_t i = 0; i < tapIntervalCount; ++i) {
-    totalIntervalMs += tapIntervalsMs[i];
-  }
-
-  const uint32_t averageIntervalMs = totalIntervalMs / tapIntervalCount;
-  if (averageIntervalMs == 0) {
-    return;
-  }
-
-  resetAudioClockFollow();
-  setClockBpm(static_cast<uint16_t>(60000UL / averageIntervalMs), "tap");
-
-  Serial.printf("tap_tempo=bpm:%u\n", static_cast<unsigned>(currentBpm));
-}
-
 void selectNextMode() {
   currentModeIndex = (currentModeIndex + 1) % kModeCount;
   commandRevision++;
@@ -758,34 +725,6 @@ void activateBrain() {
   sendCurrentCommands();
   nextSendAtMs = millis() + COMMAND_REFRESH_MS;
   Serial.println("brain=live");
-}
-
-void registerTap() {
-  const uint32_t now = millis();
-  tapTempoUiUntilMs = now + TAP_TEMPO_TIMEOUT_MS;
-
-  if (lastTapAtMs != 0 && (now - lastTapAtMs) <= TAP_TEMPO_TIMEOUT_MS) {
-    drawTapTempoFlash();
-    const uint32_t intervalMs = now - lastTapAtMs;
-
-    if (tapIntervalCount < 3) {
-      tapIntervalsMs[tapIntervalCount++] = intervalMs;
-    } else {
-      tapIntervalsMs[0] = tapIntervalsMs[1];
-      tapIntervalsMs[1] = tapIntervalsMs[2];
-      tapIntervalsMs[2] = intervalMs;
-    }
-
-    pendingSingleTap = false;
-    pendingSingleTapAtMs = 0;
-    updateBpmFromTapTempo();
-  } else {
-    pendingSingleTap = true;
-    pendingSingleTapAtMs = now;
-    tapIntervalCount = 0;
-  }
-
-  lastTapAtMs = now;
 }
 
 void setup() {
@@ -814,7 +753,7 @@ void setup() {
   Serial.printf("peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
   Serial.printf("add_peer=%d\n", static_cast<int>(peerResult.addPeer));
   Serial.printf("mode=%s\n", espNowReady ? "silent start" : "startup only");
-  Serial.println("button=single tap start/next mode | multi tap bpm");
+  Serial.println("button=press start/next mode");
   Serial.println("node_discovery=esp-now node status receive");
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
@@ -835,16 +774,6 @@ void loop() {
   expireTrackedNodes(now);
 
   if (M5.Btn.wasPressed()) {
-    registerTap();
-  }
-
-  if (lastTapAtMs != 0 && (now - lastTapAtMs) > TAP_TEMPO_TIMEOUT_MS) {
-    resetTapTempoSequence();
-  }
-
-  if (pendingSingleTap && (now - pendingSingleTapAtMs) > BUTTON_TAP_WINDOW_MS) {
-    pendingSingleTap = false;
-    pendingSingleTapAtMs = 0;
     if (brainLive) {
       selectNextMode();
     } else {
