@@ -32,6 +32,30 @@ uint8_t segmentNoise8(uint32_t elapsedMs, uint16_t segmentMs, uint8_t salt) {
   return hash8(segment + static_cast<uint32_t>(salt) * 131U);
 }
 
+uint8_t smoothSegmentNoise8(uint32_t elapsedMs, uint32_t segmentMs, uint8_t salt) {
+  const uint32_t safeSegmentMs = (segmentMs == 0U) ? 1U : segmentMs;
+  const uint32_t segment = elapsedMs / safeSegmentMs;
+  const uint32_t segmentOffset = elapsedMs % safeSegmentMs;
+  const uint8_t from = hash8(segment + static_cast<uint32_t>(salt) * 131U);
+  const uint8_t to = hash8(segment + 1U + static_cast<uint32_t>(salt) * 131U);
+  const uint8_t mix = ease8InOutCubic(
+    static_cast<uint8_t>((segmentOffset * 255UL) / safeSegmentMs)
+  );
+  return lerp8by8(from, to, mix);
+}
+
+uint8_t pendulumMix8(uint32_t elapsedMs, uint32_t swingMs, uint8_t salt) {
+  const uint32_t safeSwingMs = (swingMs == 0U) ? 1U : swingMs;
+  const uint32_t cycleMs = safeSwingMs * 2U;
+  const uint32_t offsetMs =
+    (static_cast<uint32_t>(hash8(static_cast<uint32_t>(salt) * 97U)) * cycleMs) / 255UL;
+  const uint32_t cycleOffsetMs = (elapsedMs + offsetMs) % cycleMs;
+  const uint8_t phase = static_cast<uint8_t>((cycleOffsetMs * 255UL) / cycleMs);
+  const uint8_t triangle =
+    (phase < 128U) ? static_cast<uint8_t>(phase * 2U) : static_cast<uint8_t>((255U - phase) * 2U);
+  return ease8InOutCubic(triangle);
+}
+
 uint8_t pseudoFlicker(uint32_t now, uint8_t pixel) {
   const uint32_t value = now / 35U + static_cast<uint32_t>(pixel * 23U);
   return static_cast<uint8_t>((value * 37U + pixel * 19U) & 0x3F);
@@ -93,6 +117,48 @@ uint8_t mixLevel(uint8_t from, uint8_t to, uint8_t mix) {
   return static_cast<uint8_t>(value);
 }
 
+SurfaceModulationState buildSurfaceModulationState(uint32_t now) {
+  static constexpr uint32_t kMacroSwingMs = 300000U;
+  SurfaceModulationState state = {};
+  state.active = true;
+  const uint8_t activityPendulum = pendulumMix8(now, kMacroSwingMs, 5U);
+  const uint8_t activityWobble = smoothSegmentNoise8(now + 5000U, 42000U, 17U);
+  state.activity = mixLevel(
+    64U,
+    220U,
+    mixLevel(activityPendulum, activityWobble, 38U)
+  );
+
+  const uint8_t shadowPendulum = pendulumMix8(now, kMacroSwingMs, 11U);
+  const uint8_t shadowWobble = smoothSegmentNoise8(now, 36000U, 29U);
+  state.shadowDepth = mixLevel(
+    6U,
+    48U,
+    mixLevel(shadowPendulum, shadowWobble, 44U)
+  );
+
+  const uint8_t pocketPendulum = pendulumMix8(now, kMacroSwingMs, 23U);
+  const uint8_t pocketWobble = smoothSegmentNoise8(now + 9000U, 50000U, 31U);
+  state.pocketChance = mixLevel(
+    2U,
+    15U,
+    mixLevel(pocketPendulum, pocketWobble, 36U)
+  );
+
+  const uint8_t coolPendulum = pendulumMix8(now, kMacroSwingMs, 37U);
+  const uint8_t coolWobble = smoothSegmentNoise8(now + 17000U, 46000U, 41U);
+  state.coolShift = mixLevel(
+    2U,
+    44U,
+    mixLevel(coolPendulum, coolWobble, 32U)
+  );
+
+  const uint8_t colorPendulum = pendulumMix8(now, kMacroSwingMs, 53U);
+  const uint8_t colorWobble = smoothSegmentNoise8(now + 23000U, 54000U, 47U);
+  state.colorDrift = mixLevel(colorPendulum, colorWobble, 26U);
+  return state;
+}
+
 uint8_t classicPulseEnvelope8(uint8_t phase) {
   if (phase < 78U) {
     return ease8InOutCubic(segmentMix8(phase, 0U, 78U));
@@ -140,6 +206,28 @@ uint8_t heartbeatEnvelope8(uint8_t phase) {
   }
 
   return max(firstHit, max(secondHit, tail));
+}
+
+uint8_t ledPosition8(uint8_t pixel) {
+  if (kRgbLedCount <= 1U) {
+    return 0U;
+  }
+
+  return static_cast<uint8_t>(
+    (static_cast<uint16_t>(pixel) * 255U) / static_cast<uint16_t>(kRgbLedCount - 1U)
+  );
+}
+
+uint8_t proximityMix8(uint8_t pixelPosition, uint8_t targetPosition, uint8_t reach) {
+  const uint8_t distance =
+    (pixelPosition > targetPosition) ? (pixelPosition - targetPosition) : (targetPosition - pixelPosition);
+  if (distance >= reach) {
+    return 0U;
+  }
+
+  return ease8InOutCubic(
+    static_cast<uint8_t>(255U - ((static_cast<uint16_t>(distance) * 255U) / reach))
+  );
 }
 
 WavePhaseLayout barWaveLayout(const decaflash::RgbCommand& command, uint32_t phraseDurationMs) {
@@ -215,12 +303,13 @@ void applyBarWaveModulation(
   uint32_t now,
   uint8_t pixel,
   uint8_t phase,
+  uint8_t activity,
   WavePixelState& state
 ) {
   // This is the seam where future audio-driven modulation can hook in.
   const uint8_t flicker = pseudoFlicker(now, pixel);
   if (phase < layout.whiteRiseEnd) {
-    const uint8_t lift = static_cast<uint8_t>(flicker / 6U);
+    const uint8_t lift = scale8(static_cast<uint8_t>(flicker / 4U), mixLevel(68U, 220U, activity));
     state.level = mixLevel(
       state.level,
       static_cast<uint8_t>(state.level > (255U - lift) ? 255U : state.level + lift),
@@ -231,9 +320,9 @@ void applyBarWaveModulation(
   const bool nearCrest = phase >= static_cast<uint8_t>(layout.lightBlueEnd - 8U) &&
                          phase <= static_cast<uint8_t>(layout.whiteHoldEnd + 10U);
   const uint8_t sparkleSeed = hash8((now / 65U) + static_cast<uint32_t>(pixel * 37U) + phase);
-  if (nearCrest && sparkleSeed > 240U) {
-    state.color = blend(state.color, CRGB::White, 170U);
-    state.level = mixLevel(state.level, command.peakLevel, 188U);
+  if (nearCrest && sparkleSeed > mixLevel(252U, 236U, activity)) {
+    state.color = blend(state.color, CRGB::White, mixLevel(74U, 132U, activity));
+    state.level = mixLevel(state.level, command.peakLevel, mixLevel(120U, 204U, activity));
     return;
   }
 
@@ -345,7 +434,16 @@ void RgbStripRenderer::service(uint32_t now) {
       break;
   }
 
+  applySurfaceModulation(now);
   FastLED.show();
+}
+
+SurfaceModulationState RgbStripRenderer::surfaceModulationState(uint32_t now) const {
+  if (currentCommand_.pattern == decaflash::RgbPattern::Off) {
+    return {};
+  }
+
+  return buildSurfaceModulationState(now);
 }
 
 void RgbStripRenderer::renderSolid(uint8_t red, uint8_t green, uint8_t blue) {
@@ -383,6 +481,7 @@ void RgbStripRenderer::renderBarWave(uint32_t now) {
 
   const uint32_t travelMs = (currentCommand_.cycleMs == 0) ? (beatIntervalMs / 2U) : currentCommand_.cycleMs;
   const WavePhaseLayout layout = barWaveLayout(currentCommand_, phraseDurationMs);
+  const SurfaceModulationState modulation = surfaceModulationState(now);
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
     const uint32_t laneOffsetMs =
@@ -393,7 +492,7 @@ void RgbStripRenderer::renderBarWave(uint32_t now) {
     }
     const uint8_t phase = static_cast<uint8_t>((laneElapsedMs * 255UL) / phraseDurationMs);
     WavePixelState laneState = baseBarWaveState(currentCommand_, layout, phase);
-    applyBarWaveModulation(currentCommand_, layout, now, i, phase, laneState);
+    applyBarWaveModulation(currentCommand_, layout, now, i, phase, modulation.activity, laneState);
     gStripLeds[i] = scaleColor(laneState.color, laneState.level);
   }
 }
@@ -414,13 +513,17 @@ void RgbStripRenderer::renderBeatPulse(uint32_t now) {
   }
 
   const uint8_t phase = static_cast<uint8_t>((elapsedMs * 255UL) / pulseDurationMs);
+  const SurfaceModulationState modulation = surfaceModulationState(now);
   const uint8_t envelope = classicPulseEnvelope8(phase);
   const uint8_t colorMix = ease8InOutCubic(envelope);
-  const uint8_t crestMix = pulseCrestMix8(phase);
+  const uint8_t crestMix = scale8(
+    pulseCrestMix8(phase),
+    mixLevel(92U, 224U, modulation.activity)
+  );
   const uint8_t bodyLevel = mixLevel(
     currentCommand_.floorLevel,
     currentCommand_.baseLevel,
-    envelope
+    scale8(envelope, mixLevel(208U, 255U, modulation.activity))
   );
   const uint8_t finalLevel = mixLevel(
     bodyLevel,
@@ -469,13 +572,17 @@ void RgbStripRenderer::renderAccent(uint32_t now) {
   }
 
   const uint8_t phase = static_cast<uint8_t>((elapsedPhraseMs * 255UL) / phraseDurationMs);
-  const uint8_t envelope = heartbeatEnvelope8(phase);
+  const SurfaceModulationState modulation = surfaceModulationState(now);
+  const uint8_t envelope = scale8(
+    heartbeatEnvelope8(phase),
+    mixLevel(190U, 255U, modulation.activity)
+  );
   const uint8_t level = mixLevel(
     currentCommand_.floorLevel,
     currentCommand_.peakLevel,
     envelope
   );
-  const uint8_t colorMix = scale8(envelope, 120U);
+  const uint8_t colorMix = scale8(envelope, mixLevel(92U, 148U, modulation.activity));
   const CRGB pulseColor = blend(
     primaryColor(currentCommand_),
     secondaryColor(currentCommand_),
@@ -488,20 +595,98 @@ void RgbStripRenderer::renderAccent(uint32_t now) {
 }
 
 void RgbStripRenderer::renderRunnerFlicker(uint32_t now) {
-  (void)now;
   const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
   const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
   const uint32_t absoluteBeatIndex =
     ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
     static_cast<uint32_t>(safeBeatInBar - 1U);
   const bool swapPattern = (absoluteBeatIndex & 1U) != 0U;
+  const bool reverseRunner = (absoluteBeatIndex & 1U) == 0U;
+  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
+  uint32_t elapsedBeatMs = now - beatStartedAtMs_;
+  if (elapsedBeatMs > beatIntervalMs) {
+    elapsedBeatMs = beatIntervalMs;
+  }
+  const uint8_t beatPhase = static_cast<uint8_t>((elapsedBeatMs * 255UL) / beatIntervalMs);
+  const SurfaceModulationState modulation = surfaceModulationState(now);
+  const uint8_t runnerHead = reverseRunner ? static_cast<uint8_t>(255U - beatPhase) : beatPhase;
+  const uint8_t echoHead = static_cast<uint8_t>(runnerHead + (reverseRunner ? 40U : 216U));
   const CRGB primary = primaryColor(currentCommand_);
   const CRGB secondary = secondaryColor(currentCommand_);
-  const uint8_t level = currentCommand_.baseLevel;
+  const CRGB highlight = blend(
+    secondary,
+    CRGB(136, 220, 255),
+    mixLevel(68U, 144U, modulation.activity)
+  );
+  const uint8_t bodySwing = scale8(
+    wave8FromProgress(static_cast<uint8_t>(beatPhase + 32U)),
+    mixLevel(18U, 72U, modulation.activity)
+  );
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
     const bool usePrimary = ((i + (swapPattern ? 1U : 0U)) % 2U) == 0U;
-    gStripLeds[i] = scaleColor(usePrimary ? primary : secondary, level);
+    const uint8_t pixelPosition = ledPosition8(i);
+    const uint8_t runnerMix = proximityMix8(pixelPosition, runnerHead, 68U);
+    const uint8_t echoMix = scale8(
+      proximityMix8(pixelPosition, echoHead, 88U),
+      mixLevel(44U, 148U, modulation.activity)
+    );
+    const uint8_t activityMix = max(runnerMix, echoMix);
+    const uint8_t level = mixLevel(
+      currentCommand_.baseLevel,
+      currentCommand_.peakLevel,
+      max(bodySwing, activityMix)
+    );
+    const CRGB laneColor = blend(
+      usePrimary ? primary : secondary,
+      highlight,
+      static_cast<uint8_t>(activityMix / 2U)
+    );
+    gStripLeds[i] = scaleColor(laneColor, level);
+  }
+}
+
+void RgbStripRenderer::applySurfaceModulation(uint32_t now) {
+  const SurfaceModulationState modulation = surfaceModulationState(now);
+  if (!modulation.active) {
+    return;
+  }
+
+  const uint8_t shadowDepth = modulation.shadowDepth;
+  const uint8_t pocketChance = modulation.pocketChance;
+  const uint8_t coolShift = modulation.coolShift;
+  const uint8_t colorDrift = modulation.colorDrift;
+  const CRGB shadowBlue = blend(CRGB(0, 8, 24), CRGB(0, 18, 64), modulation.coolShift);
+  const CRGB deepBlueTint = CRGB(0, 18, 88);
+  const CRGB indigoMagentaTint = CRGB(68, 0, 92);
+  const CRGB colorTint = blend(deepBlueTint, indigoMagentaTint, colorDrift);
+  const uint8_t distanceFromCenter =
+    (colorDrift > 127U)
+      ? static_cast<uint8_t>((colorDrift - 127U) * 2U)
+      : static_cast<uint8_t>((127U - colorDrift) * 2U);
+  const uint8_t colorDriftLimit =
+    (currentCommand_.pattern == decaflash::RgbPattern::Accent) ? 20U : 60U;
+  const uint8_t colorDriftMix = scale8(distanceFromCenter, colorDriftLimit);
+
+  for (uint8_t i = 0; i < kLedCount; ++i) {
+    if (gStripLeds[i].r == 0U && gStripLeds[i].g == 0U && gStripLeds[i].b == 0U) {
+      continue;
+    }
+
+    const uint8_t shadowSeed = hash8((now / 48U) + static_cast<uint32_t>(i * 47U));
+    const uint8_t shadowMix = scale8(ease8InOutCubic(shadowSeed), shadowDepth);
+    const uint8_t levelScale = static_cast<uint8_t>(255U - mixLevel(0U, shadowMix, 180U));
+    gStripLeds[i].nscale8_video(levelScale);
+
+    const uint8_t tintSeed = hash8((now / 88U) + static_cast<uint32_t>(i * 59U) + 17U);
+    const uint8_t tintMix = scale8(ease8InOutCubic(tintSeed), static_cast<uint8_t>(coolShift / 2U));
+    gStripLeds[i] = blend(gStripLeds[i], shadowBlue, tintMix);
+    gStripLeds[i] = blend(gStripLeds[i], colorTint, colorDriftMix);
+
+    const uint8_t pocketSeed = hash8((now / 110U) + static_cast<uint32_t>(i * 61U) + 91U);
+    if (pocketSeed > static_cast<uint8_t>(255U - pocketChance)) {
+      gStripLeds[i].nscale8_video(mixLevel(124U, 76U, shadowDepth));
+    }
   }
 }
 

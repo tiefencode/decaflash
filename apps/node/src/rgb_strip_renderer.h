@@ -4,6 +4,15 @@
 
 #include "decaflash_types.h"
 
+struct SurfaceModulationState {
+  bool active = false;
+  uint8_t activity = 0;
+  uint8_t shadowDepth = 0;
+  uint8_t pocketChance = 0;
+  uint8_t coolShift = 0;
+  uint8_t colorDrift = 0;
+};
+
 class RgbStripRenderer {
  public:
   RgbStripRenderer() = default;
@@ -22,6 +31,7 @@ class RgbStripRenderer {
     uint32_t currentBar
   );
   void service(uint32_t now);
+  SurfaceModulationState surfaceModulationState(uint32_t now) const;
 
  private:
   void renderSolid(uint8_t red, uint8_t green, uint8_t blue);
@@ -29,6 +39,7 @@ class RgbStripRenderer {
   void renderBeatPulse(uint32_t now);
   void renderAccent(uint32_t now);
   void renderRunnerFlicker(uint32_t now);
+  void applySurfaceModulation(uint32_t now);
   uint8_t accentLevel(uint32_t now, uint8_t low, uint8_t high) const;
   uint8_t clampLevel(uint16_t level) const;
 

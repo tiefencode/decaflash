@@ -23,6 +23,7 @@ class NodeOutput {
   void flash100(uint16_t flashMs);
   void service(uint32_t now);
   const char* rendererName() const;
+  bool surfaceModulationState(uint32_t now, SurfaceModulationState& state) const;
 
  private:
   FlashlightRenderer flashlight_;

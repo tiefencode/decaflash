@@ -122,3 +122,13 @@ void NodeOutput::service(uint32_t now) {
 const char* NodeOutput::rendererName() const {
   return rendererNameFor(nodeKind_);
 }
+
+bool NodeOutput::surfaceModulationState(uint32_t now, SurfaceModulationState& state) const {
+  if (nodeKind_ != decaflash::NodeKind::RgbStrip) {
+    state = {};
+    return false;
+  }
+
+  state = rgbStrip_.surfaceModulationState(now);
+  return state.active;
+}

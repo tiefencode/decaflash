@@ -91,7 +91,7 @@ inline SceneDefinition makeScene1() {
   constexpr uint8_t kWashFloor = 0;
   constexpr uint8_t kWashBase = 18;
   constexpr uint8_t kWashPeak = 152;
-  constexpr uint16_t kWashTravelMs = 300;
+  constexpr uint16_t kWashTravelMs = 380;
   constexpr uint16_t kWashWhiteHoldMs = 70;
 
   // Szene 1 startet mit einer langsamen 4-Takte-Welle:
@@ -150,8 +150,8 @@ inline SceneDefinition makeScene1() {
       kDeepBlue,
       kPulseBlue,
       0,
-      132,
-      132,
+      92,
+      176,
       1,
       1,
       0,

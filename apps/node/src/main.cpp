@@ -40,6 +40,7 @@ static constexpr char kConfigNodeKindKey[] = "node_kind";
 static constexpr char kConfigNodeEffectKey[] = "node_effect";
 static constexpr size_t kSerialLineCapacity = 48;
 static constexpr uint32_t NODE_STATUS_INTERVAL_MS = 5000;
+static constexpr uint32_t FILTER_MONITOR_INTERVAL_MS = 5000;
 static constexpr int BUTTON_PIN = 39;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
@@ -94,6 +95,7 @@ char serialLine[kSerialLineCapacity] = {};
 size_t serialLineLength = 0;
 bool espNowReady = false;
 uint32_t nextStatusAtMs = 0;
+uint32_t nextFilterMonitorAtMs = 0;
 bool outputMuted = false;
 
 bool buttonPressed = false;
@@ -255,6 +257,24 @@ bool isSupportedNodeRole(uint8_t rawNodeRole) {
     default:
       return false;
   }
+}
+
+const char* colorDriftSideName(uint8_t colorDrift) {
+  if (colorDrift < 96U) {
+    return "blue";
+  }
+
+  if (colorDrift > 160U) {
+    return "magenta";
+  }
+
+  return "neutral";
+}
+
+uint8_t colorDriftStrength(uint8_t colorDrift) {
+  return (colorDrift > 127U)
+    ? static_cast<uint8_t>((colorDrift - 127U) * 2U)
+    : static_cast<uint8_t>((127U - colorDrift) * 2U);
 }
 
 NodeKind loadStoredNodeKind() {
@@ -561,6 +581,20 @@ void printStatus() {
                 runModeName(runMode),
                 static_cast<unsigned>(currentBpmValue()),
                 static_cast<unsigned>(outputMuted));
+  if (nodeIdentity.nodeKind == NodeKind::RgbStrip) {
+    SurfaceModulationState modulation = {};
+    if (renderer.surfaceModulationState(millis(), modulation)) {
+      Serial.printf("ACTIVITY: %u\n",
+                    static_cast<unsigned>(modulation.activity));
+      Serial.printf("NOISE: shadow=%u pocket=%u cool=%u\n",
+                    static_cast<unsigned>(modulation.shadowDepth),
+                    static_cast<unsigned>(modulation.pocketChance),
+                    static_cast<unsigned>(modulation.coolShift));
+      Serial.printf("COLOR: %s %u\n",
+                    colorDriftSideName(modulation.colorDrift),
+                    static_cast<unsigned>(colorDriftStrength(modulation.colorDrift)));
+    }
+  }
   Serial.println("-----");
 }
 
@@ -903,6 +937,32 @@ void serviceNodeStatus() {
   nextStatusAtMs = now + NODE_STATUS_INTERVAL_MS;
 }
 
+void serviceFilterMonitor() {
+  if (nodeIdentity.nodeKind != NodeKind::RgbStrip || outputMuted) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if ((int32_t)(now - nextFilterMonitorAtMs) < 0) {
+    return;
+  }
+
+  SurfaceModulationState modulation = {};
+  if (renderer.surfaceModulationState(now, modulation)) {
+    Serial.printf("ACTIVITY: %u\n",
+                  static_cast<unsigned>(modulation.activity));
+    Serial.printf("NOISE: shadow=%u pocket=%u cool=%u\n",
+                  static_cast<unsigned>(modulation.shadowDepth),
+                  static_cast<unsigned>(modulation.pocketChance),
+                  static_cast<unsigned>(modulation.coolShift));
+    Serial.printf("COLOR: %s %u\n",
+                  colorDriftSideName(modulation.colorDrift),
+                  static_cast<unsigned>(colorDriftStrength(modulation.colorDrift)));
+  }
+
+  nextFilterMonitorAtMs = now + FILTER_MONITOR_INTERVAL_MS;
+}
+
 void serviceButton() {
   const uint32_t now = millis();
   const bool level = digitalRead(BUTTON_PIN);
@@ -1197,6 +1257,7 @@ void setup() {
     sendNodeStatus("boot");
     nextStatusAtMs = millis() + NODE_STATUS_INTERVAL_MS;
   }
+  nextFilterMonitorAtMs = millis() + FILTER_MONITOR_INTERVAL_MS;
 }
 
 void loop() {
@@ -1206,4 +1267,5 @@ void loop() {
   serviceClock();
   serviceOutput();
   serviceNodeStatus();
+  serviceFilterMonitor();
 }
