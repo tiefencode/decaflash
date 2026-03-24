@@ -28,12 +28,13 @@ enum class NodeEffect : uint8_t {
 
 enum class FlashPattern : uint8_t {
   Off = 0,
-  PerBeat = 1,
+  BeatPulse = 1,
+  BarBurst = 2,
 };
 
-enum class FlashLength : uint8_t {
-  Short = 0,
-  Long = 1,
+enum class FlashCommandMode : uint8_t {
+  Off = 0,
+  VariationProfile = 1,
 };
 
 enum class RgbPattern : uint8_t {
@@ -46,10 +47,25 @@ enum class RgbPattern : uint8_t {
 
 struct FlashCommand {
   char name[kCommandNameLength];
+  FlashCommandMode mode;
+  uint8_t variationWindowBars;
+  uint16_t profileSeed;
+  uint8_t driveWeight;
+  uint8_t heavyWeight;
+  uint8_t doubleWeight;
+  uint8_t quadWeight;
+  uint8_t riserWeight;
+};
+
+struct FlashRenderCommand {
+  char name[kCommandNameLength];
   FlashPattern pattern;
-  FlashLength length;
   uint8_t triggerEveryBars;
   uint8_t triggerBeat;
+  uint8_t burstCount;
+  uint16_t burstIntervalMs;
+  int16_t burstIntervalStepMs;
+  uint16_t flashDurationMs;
 };
 
 struct RgbCommand {

@@ -4,7 +4,7 @@
 
 namespace decaflash::protocol {
 
-static constexpr uint16_t kProtocolVersion = 7;
+static constexpr uint16_t kProtocolVersion = 9;
 static constexpr uint32_t kProtocolMagic = 0x4443464C;  // DCFL
 
 enum class MessageType : uint8_t {

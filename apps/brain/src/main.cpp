@@ -58,7 +58,6 @@ static constexpr size_t kTrackedNodeCapacity = 8;
 static constexpr size_t kPendingNodeStatusCapacity = 6;
 static constexpr NodeEffect kFlashEffects[] = {
   NodeEffect::Pulse,
-  NodeEffect::Accent,
 };
 static constexpr NodeEffect kRgbEffects[] = {
   NodeEffect::Wash,

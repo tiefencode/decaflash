@@ -12,8 +12,9 @@
 
 using decaflash::DeviceType;
 using decaflash::FlashCommand;
-using decaflash::FlashLength;
+using decaflash::FlashCommandMode;
 using decaflash::FlashPattern;
+using decaflash::FlashRenderCommand;
 using decaflash::NodeIdentity;
 using decaflash::NodeKind;
 using decaflash::RgbCommand;
@@ -26,7 +27,9 @@ using decaflash::protocol::ClockSyncMessage;
 using decaflash::protocol::FlashCommandMessage;
 using decaflash::protocol::RgbCommandMessage;
 using decaflash::protocol::makeNodeStatusMessage;
+using decaflash::node::flashRenderCommandFor;
 using decaflash::node::flashSceneCommandFor;
+using decaflash::node::flashVariationEpochFor;
 using decaflash::node::kSceneCount;
 using decaflash::node::rgbSceneCommandFor;
 using decaflash::node::sceneName;
@@ -34,7 +37,7 @@ using decaflash::node::sceneName;
 using NodeRole = decaflash::NodeEffect;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Node;
-static constexpr NodeKind DEFAULT_NODE_KIND = NodeKind::RgbStrip;
+static constexpr NodeKind DEFAULT_NODE_KIND = NodeKind::Flashlight;
 static constexpr char kConfigNamespace[] = "decaflash";
 static constexpr char kConfigNodeKindKey[] = "node_kind";
 static constexpr char kConfigNodeEffectKey[] = "node_effect";
@@ -54,10 +57,25 @@ static constexpr uint8_t DEFAULT_BEATS_PER_BAR = 4;
 
 static constexpr FlashCommand REMOTE_IDLE_FLASH_COMMAND = {
   "Remote Idle",
+  FlashCommandMode::Off,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+};
+
+static constexpr FlashRenderCommand REMOTE_IDLE_FLASH_RENDER_COMMAND = {
+  "Off",
   FlashPattern::Off,
-  FlashLength::Short,
   1,
   1,
+  0,
+  0,
+  0,
+  0,
 };
 
 static constexpr RgbCommand REMOTE_IDLE_RGB_COMMAND = {
@@ -89,6 +107,8 @@ NodeOutput renderer;
 size_t currentProgramCount = 0;
 size_t currentProgram = 0;
 FlashCommand activeFlashCommand = REMOTE_IDLE_FLASH_COMMAND;
+FlashRenderCommand activeFlashRenderCommand = REMOTE_IDLE_FLASH_RENDER_COMMAND;
+uint32_t activeFlashVariationEpoch = UINT32_MAX;
 RgbCommand activeRgbCommand = REMOTE_IDLE_RGB_COMMAND;
 Preferences preferences;
 char serialLine[kSerialLineCapacity] = {};
@@ -109,6 +129,17 @@ uint32_t beatIntervalMs = 0;
 uint32_t currentBar = 1;
 uint8_t beatInBar = 1;
 uint8_t beatsPerBar = DEFAULT_BEATS_PER_BAR;
+
+struct FlashBurstState {
+  bool active = false;
+  uint8_t remaining = 0;
+  uint32_t nextFlashAtMs = 0;
+  uint32_t intervalMs = 0;
+  int16_t intervalStepMs = 0;
+  uint16_t flashDurationMs = 0;
+};
+
+FlashBurstState flashBurst;
 
 enum class RunMode : uint8_t {
   Demo = 0,
@@ -160,8 +191,7 @@ bool roleCompatible(NodeKind nodeKind, NodeRole nodeRole) {
              nodeRole == NodeRole::Flicker;
 
     case NodeKind::Flashlight:
-      return nodeRole == NodeRole::Pulse ||
-             nodeRole == NodeRole::Accent;
+      return nodeRole == NodeRole::Pulse;
 
     default:
       return false;
@@ -189,7 +219,8 @@ NodeRole nextNodeRole(NodeKind nodeKind, NodeRole currentRole) {
 
     case NodeKind::Flashlight:
     default:
-      return (currentRole == NodeRole::Accent) ? NodeRole::Pulse : NodeRole::Accent;
+      (void)currentRole;
+      return NodeRole::Pulse;
   }
 }
 
@@ -366,6 +397,32 @@ bool isBrainOwned(RunMode mode) {
   return mode != RunMode::Demo;
 }
 
+void logFlashVariationChange(uint32_t bar) {
+  (void)bar;
+  Serial.printf("FLASH=%s\n", activeFlashRenderCommand.name);
+}
+
+void resetFlashBurst() {
+  flashBurst = {};
+}
+
+void refreshFlashRenderCommandForBar(uint32_t bar) {
+  if (activeFlashCommand.mode == FlashCommandMode::Off) {
+    activeFlashVariationEpoch = 0;
+    activeFlashRenderCommand = REMOTE_IDLE_FLASH_RENDER_COMMAND;
+    return;
+  }
+
+  const uint32_t variationEpoch = flashVariationEpochFor(activeFlashCommand, bar);
+  if (variationEpoch == activeFlashVariationEpoch) {
+    return;
+  }
+
+  activeFlashVariationEpoch = variationEpoch;
+  activeFlashRenderCommand = flashRenderCommandFor(activeFlashCommand, bar);
+  logFlashVariationChange(bar);
+}
+
 void bumpNodeProfileRevision() {
   nodeIdentity.profileRevision++;
   if (nodeIdentity.profileRevision == 0) {
@@ -426,7 +483,10 @@ void refreshProgramSet() {
   if (currentProgramCount == 0) {
     currentProgram = 0;
     activeFlashCommand = REMOTE_IDLE_FLASH_COMMAND;
+    activeFlashRenderCommand = REMOTE_IDLE_FLASH_RENDER_COMMAND;
+    activeFlashVariationEpoch = UINT32_MAX;
     activeRgbCommand = REMOTE_IDLE_RGB_COMMAND;
+    resetFlashBurst();
     renderer.setFlashCommand(activeFlashCommand);
     renderer.setRgbCommand(activeRgbCommand);
     return;
@@ -466,6 +526,9 @@ void enterBrainWaitingMode() {
 
 void applyFlashCommand(const FlashCommand& command) {
   activeFlashCommand = command;
+  activeFlashVariationEpoch = UINT32_MAX;
+  refreshFlashRenderCommandForBar(currentBar);
+  resetFlashBurst();
   renderer.setFlashCommand(activeFlashCommand);
   outputMuted = false;
   renderer.allOff();
@@ -484,6 +547,7 @@ void resetDemoClockState() {
   lastClockBeatSerial = 0;
   clearButtonGesture();
   resetBeatRenderHistory();
+  resetFlashBurst();
   beatIntervalMs = bpmToIntervalMs(BPM);
   beatsPerBar = DEFAULT_BEATS_PER_BAR;
   beatInBar = 1;
@@ -499,25 +563,33 @@ void selectProgram(size_t programIndex, bool announce = true) {
   }
 
   currentProgram = programIndex % currentProgramCount;
+  resetDemoClockState();
   if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
     applyFlashCommand(flashSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
   } else {
     applyRgbCommand(rgbSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
   }
-  resetDemoClockState();
 
   if (announce) {
     Serial.println();
     Serial.println("-----");
-    Serial.printf("SCENE %u (%s): %s | %s | %s | %u BPM\n",
-                  static_cast<unsigned>(currentProgram + 1),
-                  sceneName(currentProgram),
-                  nodeIdentity.nodeKind == NodeKind::Flashlight
-                    ? activeFlashCommand.name
-                    : activeRgbCommand.name,
-                  nodeKindName(nodeIdentity.nodeKind),
-                  nodeRoleName(nodeIdentity.nodeEffect),
-                  static_cast<unsigned>(currentBpmValue()));
+    if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+      Serial.printf("SCENE %u (%s): profile=%s motif=%s | %s | %u BPM\n",
+                    static_cast<unsigned>(currentProgram + 1),
+                    sceneName(currentProgram),
+                    activeFlashCommand.name,
+                    activeFlashRenderCommand.name,
+                    nodeKindName(nodeIdentity.nodeKind),
+                    static_cast<unsigned>(currentBpmValue()));
+    } else {
+      Serial.printf("SCENE %u (%s): %s | %s | %s | %u BPM\n",
+                    static_cast<unsigned>(currentProgram + 1),
+                    sceneName(currentProgram),
+                    activeRgbCommand.name,
+                    nodeKindName(nodeIdentity.nodeKind),
+                    nodeRoleName(nodeIdentity.nodeEffect),
+                    static_cast<unsigned>(currentBpmValue()));
+    }
     Serial.println("-----");
   }
 
@@ -533,31 +605,52 @@ void selectNextProgram() {
 }
 
 void printPrograms() {
+  if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+    Serial.printf("scenes=%s role=%s\n",
+                  nodeKindName(nodeIdentity.nodeKind),
+                  nodeRoleName(nodeIdentity.nodeEffect));
+
+    for (size_t i = 0; i < currentProgramCount; ++i) {
+      const FlashCommand command = flashSceneCommandFor(nodeIdentity.nodeEffect, i);
+      Serial.printf("  %u -> %s | %s\n",
+                    static_cast<unsigned>(i + 1),
+                    sceneName(i),
+                    command.name);
+    }
+    return;
+  }
+
   Serial.printf("scenes=%s role=%s\n",
                 nodeKindName(nodeIdentity.nodeKind),
                 nodeRoleName(nodeIdentity.nodeEffect));
 
   for (size_t i = 0; i < currentProgramCount; ++i) {
-    const char* name = nodeIdentity.nodeKind == NodeKind::Flashlight
-      ? flashSceneCommandFor(nodeIdentity.nodeEffect, i).name
-      : rgbSceneCommandFor(nodeIdentity.nodeEffect, i).name;
     Serial.printf("  %u -> %s | %s\n",
                   static_cast<unsigned>(i + 1),
                   sceneName(i),
-                  name);
+                  rgbSceneCommandFor(nodeIdentity.nodeEffect, i).name);
   }
 }
 
 void printHelp() {
   Serial.println();
   Serial.println("Button:");
-  Serial.println("  short press -> next scene (demo only)");
-  Serial.println("  long press  -> next role");
+  if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+    Serial.println("  short press -> next scene");
+    Serial.println("  long press  -> turn output off");
+  } else {
+    Serial.println("  short press -> next scene (demo only)");
+    Serial.println("  long press  -> next role");
+  }
   Serial.println();
   Serial.println("Serial:");
   Serial.println("  mode rgb");
   Serial.println("  mode flash");
-  Serial.println("  role wash | pulse | accent | flicker");
+  if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+    Serial.println("  role pulse");
+  } else {
+    Serial.println("  role wash | pulse | accent | flicker");
+  }
   Serial.println("  effect ...   (alias for role ...)");
   Serial.println("  status");
   Serial.println("  help");
@@ -570,13 +663,20 @@ void printStatus() {
   Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
   Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
   Serial.printf("renderer=%s\n", renderer.rendererName());
-  Serial.printf("scene=%u/%u name=%s command=%s\n",
-                static_cast<unsigned>(currentProgram + 1),
-                static_cast<unsigned>(currentProgramCount),
-                sceneName(currentProgram),
-                  nodeIdentity.nodeKind == NodeKind::Flashlight
-                  ? activeFlashCommand.name
-                  : activeRgbCommand.name);
+  if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+    Serial.printf("scene=%u/%u name=%s profile=%s motif=%s\n",
+                  static_cast<unsigned>(currentProgram + 1),
+                  static_cast<unsigned>(currentProgramCount),
+                  sceneName(currentProgram),
+                  activeFlashCommand.name,
+                  activeFlashRenderCommand.name);
+  } else {
+    Serial.printf("scene=%u/%u name=%s command=%s\n",
+                  static_cast<unsigned>(currentProgram + 1),
+                  static_cast<unsigned>(currentProgramCount),
+                  sceneName(currentProgram),
+                  activeRgbCommand.name);
+  }
   Serial.printf("control=%s bpm=%u muted=%u\n",
                 runModeName(runMode),
                 static_cast<unsigned>(currentBpmValue()),
@@ -989,7 +1089,13 @@ void serviceButton() {
     if ((now - buttonPressedAtMs) >= BUTTON_LONG_PRESS_MS) {
       longPressHandled = true;
       Serial.println("button=long_press");
-      cycleNodeRole(true);
+      if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+        outputMuted = true;
+        resetFlashBurst();
+        renderer.allOff();
+      } else {
+        cycleNodeRole(true);
+      }
     }
     return;
   }
@@ -1004,8 +1110,52 @@ void serviceButton() {
   }
 }
 
-uint32_t flashDurationMsFor(FlashLength length) {
-  return (length == FlashLength::Long) ? 120U : 65U;
+uint32_t clampBurstInterval(int32_t intervalMs) {
+  if (intervalMs < 80) {
+    return 80;
+  }
+
+  return static_cast<uint32_t>(intervalMs);
+}
+
+void startFlashBurst(const FlashRenderCommand& command) {
+  if (command.burstCount == 0 || command.flashDurationMs == 0) {
+    return;
+  }
+
+  flashBurst.active = true;
+  flashBurst.remaining = command.burstCount;
+  flashBurst.intervalMs = command.burstIntervalMs;
+  flashBurst.nextFlashAtMs = millis();
+  flashBurst.intervalStepMs = command.burstIntervalStepMs;
+  flashBurst.flashDurationMs = command.flashDurationMs;
+}
+
+void serviceFlashBurst() {
+  if (nodeIdentity.nodeKind != NodeKind::Flashlight || outputMuted || !flashBurst.active) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if ((int32_t)(now - flashBurst.nextFlashAtMs) < 0) {
+    return;
+  }
+
+  renderer.flash100(flashBurst.flashDurationMs);
+
+  if (flashBurst.remaining > 0) {
+    flashBurst.remaining--;
+  }
+
+  if (flashBurst.remaining == 0) {
+    flashBurst.active = false;
+    return;
+  }
+
+  flashBurst.intervalMs = clampBurstInterval(
+    static_cast<int32_t>(flashBurst.intervalMs) + flashBurst.intervalStepMs
+  );
+  flashBurst.nextFlashAtMs = millis() + flashBurst.intervalMs;
 }
 
 bool isTriggerBeat(uint8_t triggerEveryBars, uint8_t triggerBeat) {
@@ -1023,15 +1173,22 @@ void onBeat() {
 
   if (!outputMuted) {
     if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+      refreshFlashRenderCommandForBar(currentBar);
       const bool trigger = isTriggerBeat(
-        activeFlashCommand.triggerEveryBars,
-        activeFlashCommand.triggerBeat
+        activeFlashRenderCommand.triggerEveryBars,
+        activeFlashRenderCommand.triggerBeat
       );
 
-      switch (activeFlashCommand.pattern) {
-        case FlashPattern::PerBeat:
+      switch (activeFlashRenderCommand.pattern) {
+        case FlashPattern::BeatPulse:
+          if (trigger && activeFlashRenderCommand.flashDurationMs > 0) {
+            renderer.flash100(activeFlashRenderCommand.flashDurationMs);
+          }
+          break;
+
+        case FlashPattern::BarBurst:
           if (trigger) {
-            renderer.flash100(flashDurationMsFor(activeFlashCommand.length));
+            startFlashBurst(activeFlashRenderCommand);
           }
           break;
 
@@ -1087,6 +1244,7 @@ void serviceOutput() {
     return;
   }
 
+  serviceFlashBurst();
   renderer.service(millis());
 }
 
