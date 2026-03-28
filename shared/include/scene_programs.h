@@ -210,7 +210,7 @@ inline FlashRenderCommand flashRenderCommandForMotif(
       return flashRenderCommand(
         "Heavy Half",
         FlashPattern::BeatPulse,
-        (rangeUint32(seed1, 0, 1) == 0U) ? 4U : 8U,
+        (rangeUint32(seed1, 0, 1) == 0U) ? 2U : 4U,
         1,
         1,
         0,
@@ -222,7 +222,7 @@ inline FlashRenderCommand flashRenderCommandForMotif(
       return flashRenderCommand(
         "Double Tap 3Hz",
         FlashPattern::BarBurst,
-        (rangeUint32(seed2, 0, 1) == 0U) ? 4U : 8U,
+        (rangeUint32(seed2, 0, 1) == 0U) ? 1U : 2U,
         1,
         2,
         static_cast<uint16_t>(rangeUint32(seed0, 330, 380)),
@@ -234,7 +234,7 @@ inline FlashRenderCommand flashRenderCommandForMotif(
       return flashRenderCommand(
         "Quad Skip",
         FlashPattern::BarBurst,
-        (rangeUint32(seed3, 0, 1) == 0U) ? 8U : 16U,
+        (rangeUint32(seed3, 0, 1) == 0U) ? 2U : 4U,
         1,
         4,
         static_cast<uint16_t>(rangeUint32(seed0, 260, 310)),
@@ -246,7 +246,7 @@ inline FlashRenderCommand flashRenderCommandForMotif(
       return flashRenderCommand(
         "Riser 5x",
         FlashPattern::BarBurst,
-        (rangeUint32(seed0, 0, 2) == 0U) ? 16U : 32U,
+        (rangeUint32(seed0, 0, 1) == 0U) ? 2U : 4U,
         1,
         5,
         static_cast<uint16_t>(rangeUint32(seed1, 340, 410)),
@@ -259,8 +259,8 @@ inline FlashRenderCommand flashRenderCommandForMotif(
       return flashRenderCommand(
         "Beat Drive",
         FlashPattern::BeatPulse,
-        (rangeUint32(seed1, 0, 2) == 0U) ? 4U : 2U,
-        (rangeUint32(seed2, 0, 4) == 0U) ? 3U : 1U,
+        1,
+        (rangeUint32(seed2, 0, 1) == 0U) ? 0U : 1U,
         1,
         0,
         0,
@@ -286,7 +286,7 @@ inline SceneDefinition makeScene1() {
   return {
     "szene 1",
 
-    flashProfileCommand("Scene 1 Flash", 32, 17, 44, 32, 14, 7, 3),
+    flashProfileCommand("Scene 1 Flash", 8, 17, 30, 14, 24, 20, 12),
 
     rgbCommand(
       "Scene 1 Wash",
