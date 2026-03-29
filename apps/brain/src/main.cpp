@@ -8,6 +8,7 @@
 #include "matrix_ui.h"
 #include "pdm_microphone.h"
 #include "protocol.h"
+#include "brain_shell.h"
 #include "text_playback.h"
 
 using decaflash::DeviceType;
@@ -766,7 +767,7 @@ void setup() {
   Serial.printf("startup=%s\n", espNowReady ? "silent start" : "startup only");
   Serial.println("button=press start/next scene");
   Serial.println("node_discovery=esp-now node status receive");
-  decaflash::brain::text_playback::printHelp();
+  decaflash::brain::shell::printHelp();
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
@@ -781,7 +782,7 @@ void setup() {
 void loop() {
   M5.update();
   const uint32_t now = millis();
-  decaflash::brain::text_playback::serviceSerialInput();
+  decaflash::brain::shell::serviceSerialInput();
   microphone.update();
   processPendingNodeStatuses(now);
   expireTrackedNodes(now);

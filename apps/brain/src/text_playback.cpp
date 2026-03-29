@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 
-#include <cctype>
 #include <cstring>
 
 #include "matrix_ui.h"
@@ -11,14 +10,11 @@ namespace decaflash::brain::text_playback {
 
 namespace {
 
-static constexpr size_t kSerialCommandCapacity = 96;
 static constexpr size_t kTextBufferCapacity = 96;
 static constexpr uint32_t kCharacterDisplayMs = 640;
 static constexpr uint32_t kSpaceDisplayMs = 280;
 static constexpr uint32_t kCharacterGapMs = 110;
 
-char serialCommandBuffer[kSerialCommandCapacity] = {};
-size_t serialCommandLength = 0;
 char textPlaybackBuffer[kTextBufferCapacity] = {};
 size_t textPlaybackLength = 0;
 size_t textPlaybackIndex = 0;
@@ -85,79 +81,23 @@ void startTextPlayback(const char* rawText) {
                 textPlaybackBuffer);
 }
 
-void handleSerialCommand(const char* commandLine) {
-  if (commandLine == nullptr || commandLine[0] == '\0') {
-    return;
-  }
-
-  if (strcmp(commandLine, "help") == 0) {
-    printHelp();
-    return;
-  }
-
-  if (strcmp(commandLine, "text") == 0) {
-    startTextPlayback("HALLO");
-    return;
-  }
-
-  if (strcmp(commandLine, "text clear") == 0 || strcmp(commandLine, "text stop") == 0) {
-    stopTextPlayback();
-    return;
-  }
-
-  if (strncmp(commandLine, "text ", 5) == 0) {
-    startTextPlayback(commandLine + 5);
-    return;
-  }
-
-  Serial.printf("serial=unknown cmd=\"%s\"\n", commandLine);
-  printHelp();
-}
-
 }  // namespace
 
 bool isActive() {
   return textPlaybackActive;
 }
 
-void printHelp() {
-  Serial.println("serial=text <message> | text clear | help");
+bool start(const char* text) {
+  startTextPlayback(text);
+  return textPlaybackActive;
 }
 
-void serviceSerialInput() {
-  while (Serial.available() > 0) {
-    const int rawValue = Serial.read();
-    if (rawValue < 0) {
-      return;
-    }
+void stop(bool announce) {
+  stopTextPlayback(announce);
+}
 
-    const char character = static_cast<char>(rawValue);
-    if (character == '\r' || character == '\n') {
-      if (serialCommandLength == 0) {
-        continue;
-      }
-
-      serialCommandBuffer[serialCommandLength] = '\0';
-      handleSerialCommand(serialCommandBuffer);
-      serialCommandLength = 0;
-      serialCommandBuffer[0] = '\0';
-      continue;
-    }
-
-    if (!std::isprint(static_cast<unsigned char>(character))) {
-      continue;
-    }
-
-    if ((serialCommandLength + 1U) >= kSerialCommandCapacity) {
-      serialCommandBuffer[serialCommandLength] = '\0';
-      Serial.printf("serial=drop cmd_too_long=\"%s\"\n", serialCommandBuffer);
-      serialCommandLength = 0;
-      serialCommandBuffer[0] = '\0';
-      continue;
-    }
-
-    serialCommandBuffer[serialCommandLength++] = character;
-  }
+void printHelp() {
+  Serial.println("text=api start(text) stop()");
 }
 
 bool serviceMatrix(uint32_t now) {

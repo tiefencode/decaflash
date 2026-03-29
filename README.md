@@ -8,6 +8,8 @@ V1 is intentionally small:
 
 - `brain` can already broadcast demo commands and a separate beat clock over ESP-NOW
 - `brain` can now read the Unit Mini PDM on raw-signal level and print live stats over serial
+- `brain` can now display short serial-triggered text on the Matrix
+- `brain` can now use stored Wi-Fi credentials for an initial HTTPS API test command
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
 - microphone and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
@@ -100,6 +102,17 @@ Example monitor commands with the current ports:
 pio device monitor -e node --port /dev/cu.usbserial-B956E80C38
 pio device monitor -e brain --port /dev/cu.usbserial-2D52E72138
 ```
+
+Current `brain` serial commands:
+
+- `text HALLO`
+- `text HALLO, WELT`
+- `text clear`
+- `wifi status`
+- `wifi scan`
+- `wifi connect`
+- `wifi disconnect`
+- `api zen`
 
 ## Brain Controls
 
