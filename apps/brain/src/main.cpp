@@ -8,6 +8,7 @@
 #include "matrix_ui.h"
 #include "pdm_microphone.h"
 #include "protocol.h"
+#include "text_playback.h"
 
 using decaflash::DeviceType;
 using decaflash::NodeEffect;
@@ -542,6 +543,10 @@ bool isSceneUiActive(uint32_t now) {
 }
 
 void updateBeatDotOverlay(uint32_t now) {
+  if (decaflash::brain::text_playback::isActive()) {
+    return;
+  }
+
   if (brainLive && beatDotUntilMs != 0 && (int32_t)(now - beatDotUntilMs) < 0) {
     decaflash::brain::matrix::drawBeatDotOverlay(beatDotBeat, beatDotColorOverride);
     return;
@@ -552,6 +557,10 @@ void updateBeatDotOverlay(uint32_t now) {
 }
 
 void updateIdleMatrixUi(uint32_t now) {
+  if (decaflash::brain::text_playback::serviceMatrix(now)) {
+    return;
+  }
+
   if (isSceneUiActive(now) || matrixOffAtMs != 0) {
     return;
   }
@@ -757,6 +766,7 @@ void setup() {
   Serial.printf("startup=%s\n", espNowReady ? "silent start" : "startup only");
   Serial.println("button=press start/next scene");
   Serial.println("node_discovery=esp-now node status receive");
+  decaflash::brain::text_playback::printHelp();
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
@@ -771,6 +781,7 @@ void setup() {
 void loop() {
   M5.update();
   const uint32_t now = millis();
+  decaflash::brain::text_playback::serviceSerialInput();
   microphone.update();
   processPendingNodeStatuses(now);
   expireTrackedNodes(now);
