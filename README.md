@@ -113,6 +113,7 @@ Current `brain` serial commands:
 - `wifi connect`
 - `wifi disconnect`
 - `api zen`
+- `api relay`
 
 ## Brain Controls
 

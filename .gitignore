@@ -4,3 +4,4 @@
 *.log
 .DS_Store
 include/wifi_credentials.h
+include/relay_config.h

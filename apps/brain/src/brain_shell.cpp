@@ -80,6 +80,11 @@ void handleCommand(const char* commandLine) {
     return;
   }
 
+  if (strcmp(commandLine, "api relay") == 0) {
+    decaflash::brain::api_client::fetchRelayTextToTextDisplay();
+    return;
+  }
+
   Serial.printf("serial=unknown cmd=\"%s\"\n", commandLine);
   printHelp();
 }
@@ -96,6 +101,7 @@ void printHelp() {
   Serial.println("  wifi connect");
   Serial.println("  wifi disconnect");
   Serial.println("  api zen");
+  Serial.println("  api relay");
 }
 
 void serviceSerialInput() {
