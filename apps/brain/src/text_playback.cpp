@@ -11,16 +11,80 @@ namespace decaflash::brain::text_playback {
 namespace {
 
 static constexpr size_t kTextBufferCapacity = 96;
-static constexpr uint32_t kCharacterDisplayMs = 640;
-static constexpr uint32_t kSpaceDisplayMs = 280;
-static constexpr uint32_t kCharacterGapMs = 110;
+static constexpr uint32_t kCharacterDisplayMs = 400;
+static constexpr uint32_t kSpaceDisplayMs = 160;
+static constexpr uint32_t kCharacterGapMs = 66;
+static constexpr uint8_t kGlyphUmlautA = 0x80;
+static constexpr uint8_t kGlyphUmlautO = 0x81;
+static constexpr uint8_t kGlyphUmlautU = 0x82;
+static constexpr uint8_t kGlyphSharpS = 0x83;
 
-char textPlaybackBuffer[kTextBufferCapacity] = {};
+uint8_t textPlaybackBuffer[kTextBufferCapacity] = {};
 size_t textPlaybackLength = 0;
 size_t textPlaybackIndex = 0;
 bool textPlaybackActive = false;
 bool textPlaybackCharacterVisible = false;
 uint32_t nextTextPlaybackAtMs = 0;
+
+bool appendPlaybackCharacter(size_t& length, uint8_t character) {
+  if ((length + 1U) >= kTextBufferCapacity) {
+    return false;
+  }
+
+  textPlaybackBuffer[length] = character;
+  length++;
+  return true;
+}
+
+bool appendUtf8NormalizedCharacter(const char*& cursor, size_t& length) {
+  const uint8_t byte0 = static_cast<uint8_t>(cursor[0]);
+
+  if (byte0 < 0x80) {
+    cursor++;
+    return appendPlaybackCharacter(length, byte0);
+  }
+
+  if (byte0 == 0xC3 && cursor[1] != '\0') {
+    const uint8_t byte1 = static_cast<uint8_t>(cursor[1]);
+    cursor += 2;
+
+    switch (byte1) {
+      case 0x84:
+      case 0xA4:
+        return appendPlaybackCharacter(length, kGlyphUmlautA);
+
+      case 0x96:
+      case 0xB6:
+        return appendPlaybackCharacter(length, kGlyphUmlautO);
+
+      case 0x9C:
+      case 0xBC:
+        return appendPlaybackCharacter(length, kGlyphUmlautU);
+
+      case 0x9F:
+        return appendPlaybackCharacter(length, kGlyphSharpS);
+
+      default:
+        return appendPlaybackCharacter(length, '?');
+    }
+  }
+
+  if (byte0 == 0xE1 && cursor[1] != '\0' && cursor[2] != '\0' &&
+      static_cast<uint8_t>(cursor[1]) == 0xBA &&
+      static_cast<uint8_t>(cursor[2]) == 0x9E) {
+    cursor += 3;
+    return appendPlaybackCharacter(length, kGlyphSharpS);
+  }
+
+  cursor++;
+
+  while ((*cursor != '\0') &&
+         ((static_cast<uint8_t>(*cursor) & 0xC0U) == 0x80U)) {
+    cursor++;
+  }
+
+  return appendPlaybackCharacter(length, '?');
+}
 
 void clearTextPlayback() {
   textPlaybackActive = false;
@@ -54,17 +118,14 @@ void startTextPlayback(const char* rawText) {
     rawText++;
   }
 
+  const char* cursor = rawText;
   size_t length = 0;
-  while (rawText[length] != '\0' && rawText[length] != '\r' && rawText[length] != '\n') {
-    if ((length + 1U) >= kTextBufferCapacity) {
+  while (*cursor != '\0' && *cursor != '\r' && *cursor != '\n') {
+    if (!appendUtf8NormalizedCharacter(cursor, length)) {
       break;
     }
-
-    textPlaybackBuffer[length] = rawText[length];
-    length++;
   }
 
-  textPlaybackBuffer[length] = '\0';
   textPlaybackLength = length;
   textPlaybackIndex = 0;
   textPlaybackCharacterVisible = false;
@@ -76,9 +137,7 @@ void startTextPlayback(const char* rawText) {
     return;
   }
 
-  Serial.printf("text=start len=%u text=\"%s\"\n",
-                static_cast<unsigned>(textPlaybackLength),
-                textPlaybackBuffer);
+  Serial.printf("text=start len=%u\n", static_cast<unsigned>(textPlaybackLength));
 }
 
 }  // namespace
@@ -110,7 +169,7 @@ bool serviceMatrix(uint32_t now) {
   }
 
   if (!textPlaybackCharacterVisible) {
-    const char character = textPlaybackBuffer[textPlaybackIndex];
+    const uint8_t character = textPlaybackBuffer[textPlaybackIndex];
     decaflash::brain::matrix::drawTextCharacter(character);
     textPlaybackCharacterVisible = true;
     nextTextPlaybackAtMs = now + textDisplayDurationMs(character);

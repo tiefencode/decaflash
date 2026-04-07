@@ -11,8 +11,13 @@ namespace {
 
 static constexpr uint8_t kMatrixPixelCount = 25;
 static constexpr uint8_t kBeatDotPixelIndex = 4;
+static constexpr uint8_t kGlyphUmlautA = 0x80;
+static constexpr uint8_t kGlyphUmlautO = 0x81;
+static constexpr uint8_t kGlyphUmlautU = 0x82;
+static constexpr uint8_t kGlyphSharpS = 0x83;
+
 struct Glyph {
-  char character;
+  uint8_t character;
   uint8_t rows[5];
 };
 
@@ -67,6 +72,10 @@ static constexpr Glyph kTextGlyphs[] = {
   {'X', {0b10001, 0b01010, 0b00100, 0b01010, 0b10001}},
   {'Y', {0b10001, 0b01010, 0b00100, 0b00100, 0b00100}},
   {'Z', {0b11111, 0b00010, 0b00100, 0b01000, 0b11111}},
+  {kGlyphUmlautA, {0b01010, 0b01110, 0b10001, 0b11111, 0b10001}},
+  {kGlyphUmlautO, {0b01010, 0b01110, 0b10001, 0b10001, 0b01110}},
+  {kGlyphUmlautU, {0b01010, 0b10001, 0b10001, 0b10001, 0b01110}},
+  {kGlyphSharpS, {0b01110, 0b10000, 0b01110, 0b10001, 0b11110}},
 };
 
 uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
@@ -103,10 +112,16 @@ uint32_t beatDotColor(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
   return (beatDotBeat == 1) ? color(255, 210, 0) : color(255, 255, 255);
 }
 
-const Glyph* glyphForCharacter(char character) {
-  const char uppercaseCharacter = static_cast<char>(
-    std::toupper(static_cast<unsigned char>(character))
-  );
+uint8_t uppercaseAsciiCharacter(uint8_t character) {
+  if (character >= 'a' && character <= 'z') {
+    return static_cast<uint8_t>(character - 'a' + 'A');
+  }
+
+  return character;
+}
+
+const Glyph* glyphForCharacter(uint8_t character) {
+  const uint8_t uppercaseCharacter = uppercaseAsciiCharacter(character);
 
   for (const auto& glyph : kTextGlyphs) {
     if (glyph.character == uppercaseCharacter) {
@@ -166,7 +181,7 @@ void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
   M5.dis.drawpix(kBeatDotPixelIndex, beatDotColor(beatDotBeat, beatDotColorOverride));
 }
 
-void drawTextCharacter(char character, uint32_t colorValue) {
+void drawTextCharacter(uint8_t character, uint32_t colorValue) {
   clearAllPixels();
 
   const Glyph* glyph = glyphForCharacter(character);

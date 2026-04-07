@@ -108,12 +108,11 @@ Current `brain` serial commands:
 - `text HALLO`
 - `text HALLO, WELT`
 - `text clear`
+- `chattie neon nacht`
 - `wifi status`
 - `wifi scan`
 - `wifi connect`
 - `wifi disconnect`
-- `api zen`
-- `api relay`
 
 ## Brain Controls
 

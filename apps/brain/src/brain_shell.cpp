@@ -20,6 +20,20 @@ size_t serialCommandLength = 0;
 bool promptVisible = false;
 bool lastCharacterWasCarriageReturn = false;
 
+void eraseLastInputCodepoint() {
+  if (serialCommandLength == 0) {
+    return;
+  }
+
+  do {
+    serialCommandLength--;
+  } while (serialCommandLength > 0 &&
+           (static_cast<unsigned char>(serialCommandBuffer[serialCommandLength]) & 0xC0U) == 0x80U);
+
+  serialCommandBuffer[serialCommandLength] = '\0';
+  Serial.print("\b \b");
+}
+
 void printPrompt() {
   Serial.print("brain> ");
   promptVisible = true;
@@ -50,6 +64,16 @@ void handleCommand(const char* commandLine) {
     return;
   }
 
+  if (strcmp(commandLine, "chattie") == 0) {
+    Serial.println("serial=hint usage=chattie <text>");
+    return;
+  }
+
+  if (strncmp(commandLine, "chattie ", 8) == 0) {
+    decaflash::brain::api_client::fetchCloudChattieInputToTextDisplay(commandLine + 8);
+    return;
+  }
+
   if (strcmp(commandLine, "wifi") == 0 || strcmp(commandLine, "wifi status") == 0) {
     decaflash::brain::wifi_manager::printStatus();
     return;
@@ -70,21 +94,6 @@ void handleCommand(const char* commandLine) {
     return;
   }
 
-  if (strcmp(commandLine, "api") == 0) {
-    decaflash::brain::api_client::printHelp();
-    return;
-  }
-
-  if (strcmp(commandLine, "api zen") == 0) {
-    decaflash::brain::api_client::fetchZenToTextDisplay();
-    return;
-  }
-
-  if (strcmp(commandLine, "api relay") == 0) {
-    decaflash::brain::api_client::fetchRelayTextToTextDisplay();
-    return;
-  }
-
   Serial.printf("serial=unknown cmd=\"%s\"\n", commandLine);
   printHelp();
 }
@@ -96,12 +105,11 @@ void printHelp() {
   Serial.println("  help");
   Serial.println("  text <message>");
   Serial.println("  text clear");
+  Serial.println("  chattie <text>");
   Serial.println("  wifi status");
   Serial.println("  wifi scan");
   Serial.println("  wifi connect");
   Serial.println("  wifi disconnect");
-  Serial.println("  api zen");
-  Serial.println("  api relay");
 }
 
 void serviceSerialInput() {
@@ -142,15 +150,12 @@ void serviceSerialInput() {
     lastCharacterWasCarriageReturn = false;
 
     if (character == '\b' || character == 127) {
-      if (serialCommandLength > 0) {
-        serialCommandLength--;
-        serialCommandBuffer[serialCommandLength] = '\0';
-        Serial.print("\b \b");
-      }
+      eraseLastInputCodepoint();
       continue;
     }
 
-    if (!std::isprint(static_cast<unsigned char>(character))) {
+    const unsigned char byte = static_cast<unsigned char>(character);
+    if (byte < 0x20U || byte == 0x7FU) {
       continue;
     }
 

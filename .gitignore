@@ -3,5 +3,6 @@
 .idea/
 *.log
 .DS_Store
+AGENTS.md
 include/wifi_credentials.h
-include/relay_config.h
+include/cloud_config.h
