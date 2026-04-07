@@ -78,6 +78,30 @@ static constexpr Glyph kTextGlyphs[] = {
   {kGlyphSharpS, {0b01110, 0b10000, 0b01110, 0b10001, 0b11110}},
 };
 
+static constexpr uint8_t kWifiIconMask[5] = {
+  0b00100,
+  0b01010,
+  0b10001,
+  0b00100,
+  0b00100,
+};
+
+static constexpr uint8_t kSpeakerIconMask[5] = {
+  0b01000,
+  0b11100,
+  0b11111,
+  0b11100,
+  0b01000,
+};
+
+static constexpr uint8_t kSpeakerMutedIconMask[5] = {
+  0b01000,
+  0b11100,
+  0b11111,
+  0b11100,
+  0b01000,
+};
+
 uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
   return (static_cast<uint32_t>(r) << 16) |
          (static_cast<uint32_t>(g) << 8) |
@@ -138,6 +162,15 @@ const Glyph* glyphForCharacter(uint8_t character) {
   return nullptr;
 }
 
+void drawMask(const uint8_t rows[5], uint32_t colorValue) {
+  for (uint8_t y = 0; y < 5; ++y) {
+    for (uint8_t x = 0; x < 5; ++x) {
+      const bool on = (rows[y] >> (4 - x)) & 0x01;
+      M5.dis.drawpix(y * 5 + x, on ? colorValue : 0x000000);
+    }
+  }
+}
+
 }  // namespace
 
 void clearAllPixels() {
@@ -195,6 +228,18 @@ void drawTextCharacter(uint8_t character, uint32_t colorValue) {
       M5.dis.drawpix(y * 5 + x, on ? colorValue : 0x000000);
     }
   }
+}
+
+void drawWifiIcon(uint32_t colorValue) {
+  drawMask(kWifiIconMask, colorValue);
+}
+
+void drawSpeakerIcon(uint32_t colorValue) {
+  drawMask(kSpeakerIconMask, colorValue);
+}
+
+void drawSpeakerMutedIcon(uint32_t colorValue) {
+  drawMask(kSpeakerMutedIconMask, colorValue);
 }
 
 }  // namespace decaflash::brain::matrix

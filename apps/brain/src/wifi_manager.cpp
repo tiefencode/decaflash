@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
+#include "matrix_ui.h"
+
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
 #define DECAFLASH_WIFI_CREDENTIALS_AVAILABLE 1
@@ -21,6 +23,17 @@ namespace {
 static constexpr uint32_t kConnectTimeoutMs = 15000;
 static constexpr uint32_t kConnectPollMs = 250;
 static constexpr uint8_t kScanListLimit = 12;
+
+uint32_t wifiPulseColor(uint32_t now) {
+  const uint32_t cycleMs = 900;
+  const uint32_t phase = now % cycleMs;
+  const uint32_t halfCycleMs = cycleMs / 2U;
+  const uint32_t ramp = (phase < halfCycleMs) ? phase : (cycleMs - phase);
+  const uint8_t green = static_cast<uint8_t>(90U + ((ramp * 120U) / halfCycleMs));
+  const uint8_t red = static_cast<uint8_t>(70U + ((ramp * 110U) / halfCycleMs));
+  return (static_cast<uint32_t>(red) << 16) |
+         (static_cast<uint32_t>(green) << 8);
+}
 
 bool hasNonEmptyCredentials() {
   return decaflash::secrets::kWifiSsid[0] != '\0';
@@ -142,6 +155,8 @@ bool connect() {
 
   const uint32_t startedAtMs = millis();
   while ((millis() - startedAtMs) < kConnectTimeoutMs) {
+    decaflash::brain::matrix::drawWifiIcon(wifiPulseColor(millis()));
+
     if (isConnected()) {
       Serial.printf("wifi=connected ssid=%s ip=%s rssi=%d\n",
                     WiFi.SSID().c_str(),

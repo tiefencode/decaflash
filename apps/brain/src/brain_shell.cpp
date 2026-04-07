@@ -4,8 +4,10 @@
 
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 
 #include "api_client.h"
+#include "pdm_microphone.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
 
@@ -14,6 +16,7 @@ namespace decaflash::brain::shell {
 namespace {
 
 static constexpr size_t kSerialCommandCapacity = 96;
+static constexpr uint32_t kDefaultRecordDurationMs = 3000;
 
 char serialCommandBuffer[kSerialCommandCapacity] = {};
 size_t serialCommandLength = 0;
@@ -74,6 +77,24 @@ void handleCommand(const char* commandLine) {
     return;
   }
 
+  if (strcmp(commandLine, "record") == 0) {
+    decaflash::brain::startMicrophoneRecording(kDefaultRecordDurationMs);
+    return;
+  }
+
+  if (strncmp(commandLine, "record ", 7) == 0) {
+    char* end = nullptr;
+    const unsigned long durationMs = strtoul(commandLine + 7, &end, 10);
+    if (end == (commandLine + 7) || (end != nullptr && *end != '\0')) {
+      Serial.println("serial=hint usage=record [duration_ms]");
+      return;
+    }
+
+    decaflash::brain::startMicrophoneRecording(
+      static_cast<uint32_t>(durationMs));
+    return;
+  }
+
   if (strcmp(commandLine, "wifi") == 0 || strcmp(commandLine, "wifi status") == 0) {
     decaflash::brain::wifi_manager::printStatus();
     return;
@@ -106,6 +127,8 @@ void printHelp() {
   Serial.println("  text <message>");
   Serial.println("  text clear");
   Serial.println("  chattie <text>");
+  Serial.println("  record");
+  Serial.println("  record <duration_ms>");
   Serial.println("  wifi status");
   Serial.println("  wifi scan");
   Serial.println("  wifi connect");

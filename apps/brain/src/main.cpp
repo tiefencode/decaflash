@@ -9,7 +9,9 @@
 #include "pdm_microphone.h"
 #include "protocol.h"
 #include "brain_shell.h"
+#include "api_client.h"
 #include "text_playback.h"
+#include "wifi_manager.h"
 
 using decaflash::DeviceType;
 using decaflash::NodeEffect;
@@ -38,6 +40,15 @@ static constexpr uint32_t METER_REFRESH_MS = 40;
 static constexpr uint32_t BPM_FOLLOW_LOG_INTERVAL_MS = 15000;
 static constexpr uint8_t BPM_FOLLOW_LOG_DELTA = 4;
 static constexpr uint32_t UI_SCENE_DISPLAY_MS = 3000;
+static constexpr uint32_t AI_TOGGLE_PRESS_MS = 1200;
+static constexpr uint32_t AI_WIFI_RETRY_MS = 5000;
+static constexpr uint32_t AI_WIFI_CONNECTED_DISPLAY_MS = 1000;
+static constexpr uint32_t AI_WIFI_FAILED_DISPLAY_MS = 1500;
+static constexpr uint32_t AI_TOGGLE_DISPLAY_MS = 1200;
+static constexpr uint32_t AI_MUSIC_STABLE_MS = 1500;
+static constexpr uint32_t AI_FAILURE_COOLDOWN_MS = 180000;
+static constexpr uint32_t AI_SUCCESS_COOLDOWN_MS = 600000;
+static constexpr uint32_t AI_RECORD_DURATION_MS = 3000;
 static constexpr uint16_t MIN_BPM = 60;
 static constexpr uint16_t MAX_BPM = 180;
 static constexpr uint8_t AUDIO_SYNC_CANDIDATE_CONFIDENCE = 68;
@@ -101,6 +112,26 @@ uint32_t lastBpmFollowLogAtMs = 0;
 uint16_t lastLoggedFollowBpm = DEFAULT_BPM;
 decaflash::brain::PdmMicrophone microphone;
 portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
+bool aiModeEnabled = false;
+bool aiRecordingOwned = false;
+uint32_t aiNextWifiRetryAtMs = 0;
+uint32_t aiReadyToListenAtMs = 0;
+uint32_t aiCooldownUntilMs = 0;
+uint32_t aiMusicPresentSinceAtMs = 0;
+bool buttonPressedLastLoop = false;
+bool buttonLongPressHandled = false;
+uint32_t buttonPressedAtMs = 0;
+
+enum class AiTransientIcon : uint8_t {
+  None = 0,
+  Wifi = 1,
+  SpeakerOn = 2,
+  SpeakerMuted = 3,
+};
+
+AiTransientIcon aiTransientIcon = AiTransientIcon::None;
+uint32_t aiTransientIconColor = 0;
+uint32_t aiTransientIconUntilMs = 0;
 
 struct TrackedNode {
   bool active = false;
@@ -179,6 +210,86 @@ void formatMac(const uint8_t* mac, char* buffer, size_t bufferLength) {
            mac[3],
            mac[4],
            mac[5]);
+}
+
+void resetAiListeningWindow() {
+  aiMusicPresentSinceAtMs = 0;
+}
+
+void showAiTransientIcon(AiTransientIcon icon, uint32_t color, uint32_t durationMs) {
+  aiTransientIcon = icon;
+  aiTransientIconColor = color;
+  aiTransientIconUntilMs = millis() + durationMs;
+}
+
+bool aiTransientIconActive(uint32_t now) {
+  return aiTransientIcon != AiTransientIcon::None &&
+         (int32_t)(now - aiTransientIconUntilMs) < 0;
+}
+
+void clearAiTransientIcon() {
+  aiTransientIcon = AiTransientIcon::None;
+  aiTransientIconColor = 0;
+  aiTransientIconUntilMs = 0;
+}
+
+void drawAiTransientIcon() {
+  switch (aiTransientIcon) {
+    case AiTransientIcon::Wifi:
+      decaflash::brain::matrix::drawWifiIcon(aiTransientIconColor);
+      break;
+
+    case AiTransientIcon::SpeakerOn:
+      decaflash::brain::matrix::drawSpeakerIcon(aiTransientIconColor);
+      break;
+
+    case AiTransientIcon::SpeakerMuted:
+      decaflash::brain::matrix::drawSpeakerMutedIcon(aiTransientIconColor);
+      break;
+
+    case AiTransientIcon::None:
+    default:
+      break;
+  }
+}
+
+void drawRecognitionBusyIcon(bool aiOwned) {
+  decaflash::brain::matrix::drawSpeakerIcon(aiOwned ? 0x00FF00 : 0xFFFFFF);
+}
+
+void setAiCooldown(uint32_t now, uint32_t durationMs, const char* reason) {
+  aiCooldownUntilMs = now + durationMs;
+  aiReadyToListenAtMs = 0;
+  resetAiListeningWindow();
+  Serial.printf("ai=cooldown reason=%s ms=%lu\n",
+                reason,
+                static_cast<unsigned long>(durationMs));
+}
+
+void toggleAiMode(uint32_t now) {
+  aiModeEnabled = !aiModeEnabled;
+  aiRecordingOwned = false;
+  aiNextWifiRetryAtMs = 0;
+  aiReadyToListenAtMs = 0;
+  aiCooldownUntilMs = 0;
+  resetAiListeningWindow();
+
+  if (aiModeEnabled) {
+    Serial.println("ai=enabled");
+    showAiTransientIcon(AiTransientIcon::SpeakerOn, 0x00FF00, AI_TOGGLE_DISPLAY_MS);
+
+    if (decaflash::brain::wifi_manager::isConnected()) {
+      aiReadyToListenAtMs = now + AI_TOGGLE_DISPLAY_MS;
+      Serial.printf("ai=ready wait_ms=%lu\n",
+                    static_cast<unsigned long>(AI_TOGGLE_DISPLAY_MS));
+    } else {
+      aiNextWifiRetryAtMs = now + AI_TOGGLE_DISPLAY_MS;
+    }
+    return;
+  }
+
+  Serial.println("ai=disabled");
+  showAiTransientIcon(AiTransientIcon::SpeakerMuted, 0xFF0000, AI_TOGGLE_DISPLAY_MS);
 }
 
 void queueNodeStatus(const uint8_t* mac, const NodeStatusMessage& status) {
@@ -543,8 +654,121 @@ bool isSceneUiActive(uint32_t now) {
   return uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) < 0;
 }
 
-void updateBeatDotOverlay(uint32_t now) {
+void serviceAiMode(uint32_t now) {
+  if (!aiModeEnabled) {
+    return;
+  }
+
   if (decaflash::brain::text_playback::isActive()) {
+    return;
+  }
+
+  if (aiRecordingOwned || microphone.recordingActive() || microphone.recordingReady()) {
+    return;
+  }
+
+  if (aiCooldownUntilMs != 0) {
+    if ((int32_t)(now - aiCooldownUntilMs) < 0) {
+      return;
+    }
+
+    aiCooldownUntilMs = 0;
+  }
+
+  if (!decaflash::brain::wifi_manager::isConnected()) {
+    if ((int32_t)(now - aiNextWifiRetryAtMs) < 0) {
+      return;
+    }
+
+    decaflash::brain::matrix::drawWifiIcon(0xFFD000);
+    Serial.println("ai=wifi_connect");
+
+    const bool connected = decaflash::brain::wifi_manager::connect();
+    const uint32_t finishedAtMs = millis();
+    if (connected) {
+      showAiTransientIcon(AiTransientIcon::Wifi, 0x00FF00, AI_WIFI_CONNECTED_DISPLAY_MS);
+      aiReadyToListenAtMs = finishedAtMs + AI_WIFI_CONNECTED_DISPLAY_MS;
+      aiNextWifiRetryAtMs = 0;
+      Serial.printf("ai=wifi_connected wait_ms=%lu\n",
+                    static_cast<unsigned long>(AI_WIFI_CONNECTED_DISPLAY_MS));
+    } else {
+      showAiTransientIcon(AiTransientIcon::Wifi, 0xFF0000, AI_WIFI_FAILED_DISPLAY_MS);
+      aiNextWifiRetryAtMs = finishedAtMs + AI_WIFI_RETRY_MS;
+      aiReadyToListenAtMs = 0;
+      resetAiListeningWindow();
+      Serial.printf("ai=wifi_retry in_ms=%lu\n",
+                    static_cast<unsigned long>(AI_WIFI_RETRY_MS));
+    }
+    return;
+  }
+
+  if (aiReadyToListenAtMs != 0) {
+    if ((int32_t)(now - aiReadyToListenAtMs) < 0) {
+      return;
+    }
+
+    aiReadyToListenAtMs = 0;
+  }
+
+  if (!microphone.musicPresent()) {
+    resetAiListeningWindow();
+    return;
+  }
+
+  if (aiMusicPresentSinceAtMs == 0) {
+    aiMusicPresentSinceAtMs = now;
+    return;
+  }
+
+  if ((now - aiMusicPresentSinceAtMs) < AI_MUSIC_STABLE_MS) {
+    return;
+  }
+
+  if (!decaflash::brain::startMicrophoneRecording(AI_RECORD_DURATION_MS)) {
+    setAiCooldown(now, AI_FAILURE_COOLDOWN_MS, "record_start_failed");
+    return;
+  }
+
+  aiRecordingOwned = true;
+  resetAiListeningWindow();
+  Serial.printf("ai=record duration_ms=%lu\n",
+                static_cast<unsigned long>(AI_RECORD_DURATION_MS));
+}
+
+void selectNextScene();
+void activateBrain();
+
+void handleButtonInput(uint32_t now) {
+  const bool buttonPressed = M5.Btn.isPressed();
+
+  if (buttonPressed && !buttonPressedLastLoop) {
+    buttonPressedAtMs = now;
+    buttonLongPressHandled = false;
+  }
+
+  if (buttonPressed && !buttonLongPressHandled &&
+      (now - buttonPressedAtMs) >= AI_TOGGLE_PRESS_MS) {
+    toggleAiMode(now);
+    buttonLongPressHandled = true;
+  }
+
+  if (!buttonPressed && buttonPressedLastLoop) {
+    if (!buttonLongPressHandled) {
+      if (brainLive) {
+        selectNextScene();
+      } else {
+        activateBrain();
+      }
+    }
+
+    buttonLongPressHandled = false;
+  }
+
+  buttonPressedLastLoop = buttonPressed;
+}
+
+void updateBeatDotOverlay(uint32_t now) {
+  if (decaflash::brain::text_playback::isActive() || aiTransientIconActive(now)) {
     return;
   }
 
@@ -564,6 +788,15 @@ void updateIdleMatrixUi(uint32_t now) {
 
   if (isSceneUiActive(now) || matrixOffAtMs != 0) {
     return;
+  }
+
+  if (aiTransientIconActive(now)) {
+    drawAiTransientIcon();
+    return;
+  }
+
+  if (aiTransientIcon != AiTransientIcon::None) {
+    clearAiTransientIcon();
   }
 
   if ((now - lastMeterDrawAtMs) < METER_REFRESH_MS) {
@@ -784,6 +1017,27 @@ void loop() {
   const uint32_t now = millis();
   decaflash::brain::shell::serviceSerialInput();
   microphone.update();
+  handleButtonInput(now);
+  if (microphone.recordingReady()) {
+    const bool aiOwned = aiRecordingOwned;
+    drawRecognitionBusyIcon(aiOwned);
+    const bool processed = decaflash::brain::api_client::processRecordedAudioToTextDisplay(
+      microphone.recordedSamples(),
+      microphone.recordedSampleCount(),
+      microphone.recordingSampleRateHz()
+    );
+    aiRecordingOwned = false;
+    if (!processed) {
+      Serial.println("record=process_failed");
+    }
+    if (aiOwned) {
+      setAiCooldown(millis(),
+                    processed ? AI_SUCCESS_COOLDOWN_MS : AI_FAILURE_COOLDOWN_MS,
+                    processed ? "song_displayed" : "no_match_or_error");
+    }
+    microphone.clearRecording();
+  }
+  serviceAiMode(now);
   processPendingNodeStatuses(now);
   expireTrackedNodes(now);
 
@@ -791,14 +1045,6 @@ void loop() {
     sendCurrentCommands();
     nextSendAtMs = now + COMMAND_REFRESH_MS;
     pendingCommandRefresh = false;
-  }
-
-  if (M5.Btn.wasPressed()) {
-    if (brainLive) {
-      selectNextScene();
-    } else {
-      activateBrain();
-    }
   }
 
   if (uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) >= 0) {

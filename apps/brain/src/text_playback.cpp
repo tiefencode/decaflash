@@ -11,9 +11,9 @@ namespace decaflash::brain::text_playback {
 namespace {
 
 static constexpr size_t kTextBufferCapacity = 96;
-static constexpr uint32_t kCharacterDisplayMs = 400;
-static constexpr uint32_t kSpaceDisplayMs = 160;
-static constexpr uint32_t kCharacterGapMs = 66;
+static constexpr uint32_t kCharacterDisplayMs = 520;
+static constexpr uint32_t kSpaceDisplayMs = 220;
+static constexpr uint32_t kCharacterGapMs = 90;
 static constexpr uint8_t kGlyphUmlautA = 0x80;
 static constexpr uint8_t kGlyphUmlautO = 0x81;
 static constexpr uint8_t kGlyphUmlautU = 0x82;

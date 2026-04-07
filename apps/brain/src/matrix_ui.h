@@ -11,5 +11,8 @@ void clearBeatDotPixel();
 void drawSceneNumber(size_t sceneIndex);
 void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride);
 void drawTextCharacter(uint8_t character, uint32_t color = 0xFFFFFF);
+void drawWifiIcon(uint32_t color = 0xFFFFFF);
+void drawSpeakerIcon(uint32_t color = 0xFFFFFF);
+void drawSpeakerMutedIcon(uint32_t color = 0xFFFFFF);
 
 }  // namespace decaflash::brain::matrix

@@ -109,6 +109,8 @@ Current `brain` serial commands:
 - `text HALLO, WELT`
 - `text clear`
 - `chattie neon nacht`
+- `record`
+- `record 3000`
 - `wifi status`
 - `wifi scan`
 - `wifi connect`
@@ -119,6 +121,7 @@ Current `brain` serial commands:
 Current `brain` button behavior on the ATOM Matrix:
 
 - single short tap: start the brain if idle, otherwise switch immediately to the next scene
+- long press: toggle AI listening mode on or off
 
 ## Brain Microphone Input
 
