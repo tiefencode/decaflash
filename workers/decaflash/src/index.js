@@ -128,6 +128,10 @@ async function handleAudd(request, env) {
 
   const encoding = stringField(form.get("encoding"));
   let uploadFile = file;
+  const requestInfo = {
+    encoding: encoding || "passthrough",
+    original_file_bytes: file.size,
+  };
 
   if (encoding) {
     const sampleRateHz = integerField(form.get("sample_rate_hz"));
@@ -143,9 +147,22 @@ async function handleAudd(request, env) {
 
     const compressed = new Uint8Array(await file.arrayBuffer());
     const pcmSamples = decodeDecaflashImaAdpcm(compressed, sampleCount);
+    const pcmSummary = summarizePcm(pcmSamples);
     const wavBytes = buildMono16BitWav(pcmSamples, sampleRateHz);
     uploadFile = new File([wavBytes], "recording.wav", { type: "audio/wav" });
+
+    requestInfo.container = container;
+    requestInfo.sample_rate_hz = sampleRateHz;
+    requestInfo.sample_count = sampleCount;
+    requestInfo.decoded_samples = pcmSamples.length;
+    requestInfo.wav_bytes = wavBytes.byteLength;
+    requestInfo.pcm_min = pcmSummary.min;
+    requestInfo.pcm_max = pcmSummary.max;
+    requestInfo.pcm_abs_peak = pcmSummary.absPeak;
+    requestInfo.pcm_avg_abs = pcmSummary.avgAbs;
   }
+
+  console.log(`audd=request ${JSON.stringify(requestInfo)}`);
 
   const auddForm = new FormData();
   auddForm.set("api_token", env.AUDD_API_TOKEN);
@@ -157,11 +174,22 @@ async function handleAudd(request, env) {
   });
 
   if (!response.ok) {
+    console.log(`audd=upstream_http_error status=${response.status}`);
     return await upstreamJsonError("audd_failed", response);
   }
 
   const data = await response.json();
   const result = data?.result;
+  console.log(
+    `audd=upstream_response ${JSON.stringify({
+      status: data?.status ?? "",
+      matched: Boolean(result),
+      error: data?.error ?? null,
+      title: typeof result?.title === "string" ? result.title : "",
+      artist: typeof result?.artist === "string" ? result.artist : "",
+    })}`,
+  );
+
   if (!result) {
     return jsonResponse({ matched: false });
   }
@@ -186,6 +214,35 @@ function integerField(value) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function summarizePcm(samples) {
+  let min = 32767;
+  let max = -32768;
+  let absPeak = 0;
+  let absSum = 0;
+
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = samples[i];
+    if (sample < min) {
+      min = sample;
+    }
+    if (sample > max) {
+      max = sample;
+    }
+    const abs = Math.abs(sample);
+    if (abs > absPeak) {
+      absPeak = abs;
+    }
+    absSum += abs;
+  }
+
+  return {
+    min,
+    max,
+    absPeak,
+    avgAbs: samples.length > 0 ? Math.round(absSum / samples.length) : 0,
+  };
 }
 
 function decodeDecaflashImaAdpcm(bytes, sampleCount) {
