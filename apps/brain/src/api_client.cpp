@@ -6,6 +6,8 @@
 
 #include <cstring>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
 
@@ -27,6 +29,12 @@ namespace {
 static constexpr size_t kCloudTextCapacity = 96;
 static constexpr size_t kCloudTitleCapacity = 96;
 static constexpr size_t kCloudArtistCapacity = 96;
+static constexpr size_t kCloudInputCapacity = 96;
+static constexpr uint32_t kCloudTextDisplayDelayMs = 320;
+static constexpr uint32_t kCloudWorkerStackWords = 12288;
+static constexpr BaseType_t kCloudWorkerPriority = 1;
+static constexpr uint16_t kCloudConnectTimeoutMs = 12000;
+static constexpr uint16_t kCloudRequestTimeoutMs = 30000;
 static constexpr char kCloudChattieMonitorPrompt[] =
   "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. "
   "Nutze die Nutzereingabe als Inspiration. Keine Erklaerung. Keine Emojis. "
@@ -36,6 +44,27 @@ static constexpr char kCloudChattieSongPrompt[] =
   "Nutze nur Songtitel und Artist als Inspiration. Keine Lyrics. Keine Zitate. "
   "Keine Erklaerung. Keine Emojis. Maximal 8 Woerter.";
 static constexpr char kCloudMultipartBoundary[] = "----decaflash-boundary-7e8db64a";
+
+enum class CloudJobType : uint8_t {
+  None = 0,
+  Prompt = 1,
+  RecordedAudio = 2,
+};
+
+enum class CloudJobOwner : uint8_t {
+  Manual = 0,
+  Ai = 1,
+};
+
+struct CloudQueuedJob {
+  CloudJobType type = CloudJobType::None;
+  CloudJobOwner owner = CloudJobOwner::Manual;
+  uint32_t aiGeneration = 0;
+  char input[kCloudInputCapacity] = {};
+  int16_t* samples = nullptr;
+  size_t sampleCount = 0;
+  uint32_t sampleRateHz = 0;
+};
 
 class MultipartWavStream final : public Stream {
  public:
@@ -176,6 +205,31 @@ bool fetchCloudChattieText(const char* input,
                            char* destination,
                            size_t capacity);
 
+TaskHandle_t cloudWorkerTaskHandle = nullptr;
+portMUX_TYPE cloudJobMux = portMUX_INITIALIZER_UNLOCKED;
+CloudQueuedJob queuedCloudJob = {};
+bool cloudJobQueued = false;
+bool cloudJobRunning = false;
+bool cloudWorkerReady = false;
+char completedDisplayText[kCloudTextCapacity] = {};
+bool completedDisplayPending = false;
+uint32_t completedDisplayAtMs = 0;
+CloudJobOwner completedDisplayOwner = CloudJobOwner::Manual;
+bool recordedAudioCompletionPending = false;
+bool recordedAudioProcessed = false;
+CloudJobOwner recordedAudioCompletionOwner = CloudJobOwner::Manual;
+uint32_t aiCancelGeneration = 1;
+
+void clearQueuedJobLocked() {
+  queuedCloudJob.type = CloudJobType::None;
+  queuedCloudJob.owner = CloudJobOwner::Manual;
+  queuedCloudJob.aiGeneration = 0;
+  queuedCloudJob.input[0] = '\0';
+  queuedCloudJob.samples = nullptr;
+  queuedCloudJob.sampleCount = 0;
+  queuedCloudJob.sampleRateHz = 0;
+}
+
 bool cloudConfigured() {
 #if DECAFLASH_CLOUD_CONFIG_AVAILABLE
   return decaflash::secrets::kCloudChattieUrl[0] != '\0' &&
@@ -196,6 +250,21 @@ bool ensureWifiConnected() {
 
   Serial.println("api=abort reason=wifi_not_connected");
   return false;
+}
+
+bool copyInputText(const char* input, char* destination, size_t capacity) {
+  if (input == nullptr || destination == nullptr || capacity == 0) {
+    return false;
+  }
+
+  const size_t inputLength = strnlen(input, capacity);
+  if (inputLength == 0 || inputLength >= capacity) {
+    return false;
+  }
+
+  memcpy(destination, input, inputLength);
+  destination[inputLength] = '\0';
+  return true;
 }
 
 bool appendCharacter(char* destination, size_t capacity, size_t& length, char value) {
@@ -370,11 +439,14 @@ bool beginSecureRequest(HTTPClient& http,
                         const char* url,
                         const char* label) {
   client.setInsecure();
+  client.setTimeout(kCloudRequestTimeoutMs);
   if (!http.begin(client, url)) {
     Serial.printf("api=begin_failed endpoint=%s\n", label);
     return false;
   }
 
+  http.setConnectTimeout(kCloudConnectTimeoutMs);
+  http.setTimeout(kCloudRequestTimeoutMs);
   http.addHeader("User-Agent", "decaflash-brain");
   http.addHeader("Accept", "application/json, text/plain");
   return true;
@@ -672,9 +744,210 @@ bool fetchCloudChattieText(const char* input,
   return true;
 }
 
+void cloudWorkerTask(void* parameter) {
+  (void)parameter;
+
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    CloudQueuedJob localJob = {};
+    bool haveJob = false;
+    portENTER_CRITICAL(&cloudJobMux);
+    if (cloudJobQueued) {
+      localJob = queuedCloudJob;
+      clearQueuedJobLocked();
+      cloudJobQueued = false;
+      cloudJobRunning = true;
+      haveJob = true;
+    }
+    portEXIT_CRITICAL(&cloudJobMux);
+
+    if (!haveJob) {
+      continue;
+    }
+
+    bool processed = false;
+    char displayText[kCloudTextCapacity] = {};
+
+    switch (localJob.type) {
+      case CloudJobType::Prompt:
+        processed = fetchCloudChattieText(
+          localJob.input,
+          kCloudChattieMonitorPrompt,
+          displayText,
+          sizeof(displayText));
+        break;
+
+      case CloudJobType::RecordedAudio: {
+        char title[kCloudTitleCapacity] = {};
+        char artist[kCloudArtistCapacity] = {};
+        if (fetchCloudSongMetadataFromRecording(
+              localJob.samples,
+              localJob.sampleCount,
+              localJob.sampleRateHz,
+              title,
+              sizeof(title),
+              artist,
+              sizeof(artist))) {
+          processed = fetchCloudGeneratedSongText(
+            title,
+            artist,
+            displayText,
+            sizeof(displayText));
+        }
+        break;
+      }
+
+      case CloudJobType::None:
+      default:
+        break;
+    }
+
+    free(localJob.samples);
+
+    const bool aiJobCanceled =
+      (localJob.owner == CloudJobOwner::Ai) &&
+      (localJob.aiGeneration != aiCancelGeneration);
+
+    portENTER_CRITICAL(&cloudJobMux);
+    cloudJobRunning = false;
+    if (!aiJobCanceled && processed && displayText[0] != '\0') {
+      memcpy(completedDisplayText, displayText, sizeof(completedDisplayText));
+      completedDisplayPending = true;
+      completedDisplayAtMs = millis() + kCloudTextDisplayDelayMs;
+      completedDisplayOwner = localJob.owner;
+    }
+    if (!aiJobCanceled && localJob.type == CloudJobType::RecordedAudio) {
+      recordedAudioCompletionPending = true;
+      recordedAudioProcessed = processed;
+      recordedAudioCompletionOwner = localJob.owner;
+    }
+    portEXIT_CRITICAL(&cloudJobMux);
+  }
+}
+
+bool ensureCloudWorkerReady() {
+  if (cloudWorkerReady && cloudWorkerTaskHandle != nullptr) {
+    return true;
+  }
+
+  BaseType_t created = xTaskCreatePinnedToCore(
+    cloudWorkerTask,
+    "cloud_worker",
+    kCloudWorkerStackWords,
+    nullptr,
+    kCloudWorkerPriority,
+    &cloudWorkerTaskHandle,
+    0);
+
+  if (created != pdPASS || cloudWorkerTaskHandle == nullptr) {
+    Serial.println("api=worker_create_failed");
+    cloudWorkerTaskHandle = nullptr;
+    return false;
+  }
+
+  cloudWorkerReady = true;
+  Serial.println("api=worker_ready");
+  return true;
+}
+
+bool queueCloudJob(CloudQueuedJob& job) {
+  if (!ensureCloudWorkerReady()) {
+    free(job.samples);
+    return false;
+  }
+
+  if (decaflash::brain::text_playback::isActive()) {
+    Serial.println("api=busy reason=text_active");
+    free(job.samples);
+    return false;
+  }
+
+  portENTER_CRITICAL(&cloudJobMux);
+  const bool jobBusy = cloudJobQueued || cloudJobRunning || completedDisplayPending;
+  if (!jobBusy) {
+    queuedCloudJob = job;
+    cloudJobQueued = true;
+  }
+  portEXIT_CRITICAL(&cloudJobMux);
+
+  if (jobBusy) {
+    Serial.println("api=busy reason=request_in_flight");
+    free(job.samples);
+    return false;
+  }
+
+  xTaskNotifyGive(cloudWorkerTaskHandle);
+  return true;
+}
+
 }  // namespace
 
-bool fetchCloudChattieInputToTextDisplay(const char* input) {
+void begin() {
+  (void)ensureCloudWorkerReady();
+}
+
+void service(uint32_t now) {
+  bool shouldStartText = false;
+  char textBuffer[kCloudTextCapacity] = {};
+
+  portENTER_CRITICAL(&cloudJobMux);
+  if (completedDisplayPending &&
+      !decaflash::brain::text_playback::isActive() &&
+      static_cast<int32_t>(now - completedDisplayAtMs) >= 0) {
+    memcpy(textBuffer, completedDisplayText, sizeof(textBuffer));
+    completedDisplayPending = false;
+    completedDisplayText[0] = '\0';
+    completedDisplayAtMs = 0;
+    shouldStartText = textBuffer[0] != '\0';
+  }
+  portEXIT_CRITICAL(&cloudJobMux);
+
+  if (shouldStartText) {
+    decaflash::brain::text_playback::start(textBuffer);
+  }
+}
+
+bool busy() {
+  if (decaflash::brain::text_playback::isActive()) {
+    return true;
+  }
+
+  bool isBusy = false;
+  portENTER_CRITICAL(&cloudJobMux);
+  isBusy = cloudJobQueued || cloudJobRunning || completedDisplayPending;
+  portEXIT_CRITICAL(&cloudJobMux);
+  return isBusy;
+}
+
+void cancelAiWork() {
+  portENTER_CRITICAL(&cloudJobMux);
+  aiCancelGeneration++;
+
+  if (cloudJobQueued && queuedCloudJob.owner == CloudJobOwner::Ai) {
+    free(queuedCloudJob.samples);
+    clearQueuedJobLocked();
+    cloudJobQueued = false;
+  }
+
+  if (completedDisplayPending && completedDisplayOwner == CloudJobOwner::Ai) {
+    completedDisplayPending = false;
+    completedDisplayText[0] = '\0';
+    completedDisplayAtMs = 0;
+    completedDisplayOwner = CloudJobOwner::Manual;
+  }
+
+  if (recordedAudioCompletionPending && recordedAudioCompletionOwner == CloudJobOwner::Ai) {
+    recordedAudioCompletionPending = false;
+    recordedAudioProcessed = false;
+    recordedAudioCompletionOwner = CloudJobOwner::Manual;
+  }
+  portEXIT_CRITICAL(&cloudJobMux);
+
+  Serial.println("api=ai_cancel");
+}
+
+bool queueCloudChattieInputToTextDisplay(const char* input) {
   if (!cloudConfigured()) {
     Serial.println("api=cloud_missing_config file=include/cloud_config.h");
     Serial.println("api=cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
@@ -690,46 +963,74 @@ bool fetchCloudChattieInputToTextDisplay(const char* input) {
     return false;
   }
 
-  char displayText[kCloudTextCapacity] = {};
-  if (!fetchCloudChattieText(
-        input, kCloudChattieMonitorPrompt, displayText, sizeof(displayText))) {
+  CloudQueuedJob job = {};
+  job.type = CloudJobType::Prompt;
+  job.owner = CloudJobOwner::Manual;
+  if (!copyInputText(input, job.input, sizeof(job.input))) {
+    Serial.println("api=chattie_input_invalid");
     return false;
   }
 
-  return decaflash::brain::text_playback::start(displayText);
+  const bool queued = queueCloudJob(job);
+  if (queued) {
+    Serial.println("api=chattie_queued");
+  }
+  return queued;
 }
 
-bool processRecordedAudioToTextDisplay(const int16_t* samples,
-                                       size_t sampleCount,
-                                       uint32_t sampleRateHz) {
+bool queueRecordedAudioToTextDisplay(int16_t* samples,
+                                     size_t sampleCount,
+                                     uint32_t sampleRateHz,
+                                     bool aiOwned) {
   if (!cloudConfigured()) {
     Serial.println("api=cloud_missing_config file=include/cloud_config.h");
     Serial.println("api=cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
+    free(samples);
     return false;
   }
 
   if (samples == nullptr || sampleCount == 0 || sampleRateHz == 0) {
     Serial.println("record=empty");
+    free(samples);
     return false;
   }
 
   if (!ensureWifiConnected()) {
+    free(samples);
     return false;
   }
 
-  char title[kCloudTitleCapacity] = {};
-  char artist[kCloudArtistCapacity] = {};
-  if (!fetchCloudSongMetadataFromRecording(
-        samples, sampleCount, sampleRateHz, title, sizeof(title), artist, sizeof(artist))) {
-    return false;
-  }
+  CloudQueuedJob job = {};
+  job.type = CloudJobType::RecordedAudio;
+  job.owner = aiOwned ? CloudJobOwner::Ai : CloudJobOwner::Manual;
+  job.aiGeneration = aiCancelGeneration;
+  job.samples = samples;
+  job.sampleCount = sampleCount;
+  job.sampleRateHz = sampleRateHz;
 
-  char displayText[kCloudTextCapacity] = {};
-  if (!fetchCloudGeneratedSongText(title, artist, displayText, sizeof(displayText))) {
-    return false;
+  const bool queued = queueCloudJob(job);
+  if (queued) {
+    Serial.printf("api=recording_queued samples=%u rate=%lu\n",
+                  static_cast<unsigned>(sampleCount),
+                  static_cast<unsigned long>(sampleRateHz));
   }
+  return queued;
+}
 
-  return decaflash::brain::text_playback::start(displayText);
+bool takeRecordedAudioCompletion(bool& processed) {
+  bool available = false;
+
+  portENTER_CRITICAL(&cloudJobMux);
+  if (recordedAudioCompletionPending) {
+    processed = recordedAudioProcessed;
+    recordedAudioCompletionPending = false;
+    recordedAudioProcessed = false;
+    recordedAudioCompletionOwner = CloudJobOwner::Manual;
+    available = true;
+  }
+  portEXIT_CRITICAL(&cloudJobMux);
+
+  return available;
 }
 
 }  // namespace decaflash::brain::api_client

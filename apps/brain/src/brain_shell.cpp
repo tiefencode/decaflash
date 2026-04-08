@@ -73,7 +73,7 @@ void handleCommand(const char* commandLine) {
   }
 
   if (strncmp(commandLine, "chattie ", 8) == 0) {
-    decaflash::brain::api_client::fetchCloudChattieInputToTextDisplay(commandLine + 8);
+    decaflash::brain::api_client::queueCloudChattieInputToTextDisplay(commandLine + 8);
     return;
   }
 

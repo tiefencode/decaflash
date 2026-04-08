@@ -15,6 +15,8 @@ class PdmMicrophone {
   uint32_t recordingSampleRateHz() const;
   size_t recordedSampleCount() const;
   const int16_t* recordedSamples() const;
+  bool takeRecording(int16_t*& samples, size_t& sampleCount, uint32_t& sampleRateHz);
+  bool cancelRecording();
   void clearRecording();
   uint8_t meterLevel() const;
   bool musicPresent() const;

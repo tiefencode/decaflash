@@ -26,6 +26,13 @@ static constexpr RgbColor kMeterGradient[] = {
   {255,  40, 150},
   {235,   0, 255},
 };
+
+static constexpr RgbColor kAiMeterGradient[] = {
+  {  0,   0,   0},
+  {  0,  96,  16},
+  {  0, 180,  72},
+  {120, 255, 160},
+};
 uint8_t meterPixelOrder[kMeterDrawablePixelCount] = {};
 uint8_t meterPixelLevels[kMatrixPixelCount] = {};
 bool meterPixelActive[kMatrixPixelCount] = {};
@@ -126,24 +133,23 @@ uint32_t blendColor(const RgbColor& start, const RgbColor& end, uint8_t mix) {
   );
 }
 
-uint32_t meterColorForPixel(uint8_t pixelIndex) {
-  constexpr size_t kGradientStopCount = sizeof(kMeterGradient) / sizeof(kMeterGradient[0]);
-  constexpr uint16_t kGradientSegments = kGradientStopCount - 1;
+uint32_t meterColorForPixel(uint8_t pixelIndex, const RgbColor* gradient, size_t gradientStopCount) {
+  const uint16_t gradientSegments = static_cast<uint16_t>(gradientStopCount - 1U);
 
   if (pixelIndex == 0) {
     return 0x000000;
   }
 
   if (pixelIndex >= 255U) {
-    const RgbColor& last = kMeterGradient[kGradientStopCount - 1];
+    const RgbColor& last = gradient[gradientStopCount - 1U];
     return color(last.r, last.g, last.b);
   }
 
   const uint16_t scaledPosition =
-    static_cast<uint16_t>(pixelIndex * kGradientSegments);
+    static_cast<uint16_t>(pixelIndex * gradientSegments);
   const uint8_t segment = scaledPosition / 255U;
   const uint8_t mix = scaledPosition % 255U;
-  return blendColor(kMeterGradient[segment], kMeterGradient[segment + 1], mix);
+  return blendColor(gradient[segment], gradient[segment + 1], mix);
 }
 
 void updateMeterPixelLevels(uint8_t filledPixels) {
@@ -176,7 +182,7 @@ void updateMeterPixelLevels(uint8_t filledPixels) {
 
 }  // namespace
 
-void drawMicrophoneMeter(uint8_t filledPixels) {
+void drawMicrophoneMeter(uint8_t filledPixels, MeterTheme theme) {
   clearMatrix();
 
   driftMeterPixelOrder(millis(), filledPixels);
@@ -187,12 +193,19 @@ void drawMicrophoneMeter(uint8_t filledPixels) {
 
   updateMeterPixelLevels(filledPixels);
 
+  const RgbColor* gradient = kMeterGradient;
+  size_t gradientStopCount = sizeof(kMeterGradient) / sizeof(kMeterGradient[0]);
+  if (theme == MeterTheme::AiActive) {
+    gradient = kAiMeterGradient;
+    gradientStopCount = sizeof(kAiMeterGradient) / sizeof(kAiMeterGradient[0]);
+  }
+
   for (uint8_t pixel = 0; pixel < kMatrixPixelCount; ++pixel) {
     if (pixel == kBeatDotPixelIndex || meterPixelLevels[pixel] == 0) {
       continue;
     }
 
-    M5.dis.drawpix(pixel, meterColorForPixel(meterPixelLevels[pixel]));
+    M5.dis.drawpix(pixel, meterColorForPixel(meterPixelLevels[pixel], gradient, gradientStopCount));
   }
 }
 

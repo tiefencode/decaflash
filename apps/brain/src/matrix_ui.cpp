@@ -11,6 +11,9 @@ namespace {
 
 static constexpr uint8_t kMatrixPixelCount = 25;
 static constexpr uint8_t kBeatDotPixelIndex = 4;
+static constexpr uint8_t kMatrixWidth = 5;
+static constexpr uint8_t kMatrixHeight = 5;
+static constexpr size_t kDisplayBufferLength = 2 + (kMatrixPixelCount * 3);
 static constexpr uint8_t kGlyphUmlautA = 0x80;
 static constexpr uint8_t kGlyphUmlautO = 0x81;
 static constexpr uint8_t kGlyphUmlautU = 0x82;
@@ -78,28 +81,33 @@ static constexpr Glyph kTextGlyphs[] = {
   {kGlyphSharpS, {0b01110, 0b10000, 0b01110, 0b10001, 0b11110}},
 };
 
-static constexpr uint8_t kWifiIconMask[5] = {
+static constexpr uint8_t kWifiFailedIconMask[5] = {
+  0b00000,
+  0b00000,
   0b00100,
-  0b01010,
-  0b10001,
-  0b00100,
-  0b00100,
+  0b00000,
+  0b00000,
 };
 
 static constexpr uint8_t kSpeakerIconMask[5] = {
-  0b01000,
-  0b11100,
+  0b00101,
+  0b01101,
   0b11111,
-  0b11100,
-  0b01000,
+  0b01101,
+  0b00101,
 };
 
 static constexpr uint8_t kSpeakerMutedIconMask[5] = {
-  0b01000,
-  0b11100,
+  0b10100,
+  0b01110,
   0b11111,
-  0b11100,
-  0b01000,
+  0b01110,
+  0b00101,
+};
+
+uint8_t frameBuffer[kDisplayBufferLength] = {
+  kMatrixWidth,
+  kMatrixHeight,
 };
 
 uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
@@ -108,10 +116,38 @@ uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
          static_cast<uint32_t>(b);
 }
 
+uint32_t scaleColor(uint32_t colorValue, uint8_t scale) {
+  const uint8_t red = static_cast<uint8_t>((((colorValue >> 16) & 0xFFU) * scale) / 255U);
+  const uint8_t green = static_cast<uint8_t>((((colorValue >> 8) & 0xFFU) * scale) / 255U);
+  const uint8_t blue = static_cast<uint8_t>(((colorValue & 0xFFU) * scale) / 255U);
+  return color(red, green, blue);
+}
+
 void fillAllPixels(uint32_t pixelColor) {
   for (uint8_t i = 0; i < kMatrixPixelCount; ++i) {
     M5.dis.drawpix(i, pixelColor);
   }
+}
+
+void clearFrameBuffer() {
+  frameBuffer[0] = kMatrixWidth;
+  frameBuffer[1] = kMatrixHeight;
+  memset(frameBuffer + 2, 0, kDisplayBufferLength - 2);
+}
+
+void setFramePixel(uint8_t pixelIndex, uint32_t colorValue) {
+  if (pixelIndex >= kMatrixPixelCount) {
+    return;
+  }
+
+  const size_t base = 2 + (static_cast<size_t>(pixelIndex) * 3U);
+  frameBuffer[base + 0] = static_cast<uint8_t>((colorValue >> 8) & 0xFFU);
+  frameBuffer[base + 1] = static_cast<uint8_t>((colorValue >> 16) & 0xFFU);
+  frameBuffer[base + 2] = static_cast<uint8_t>(colorValue & 0xFFU);
+}
+
+void flushFrameBuffer() {
+  M5.dis.displaybuff(frameBuffer);
 }
 
 size_t sceneSlotCount() {
@@ -166,25 +202,104 @@ void drawMask(const uint8_t rows[5], uint32_t colorValue) {
   for (uint8_t y = 0; y < 5; ++y) {
     for (uint8_t x = 0; x < 5; ++x) {
       const bool on = (rows[y] >> (4 - x)) & 0x01;
-      M5.dis.drawpix(y * 5 + x, on ? colorValue : 0x000000);
+      setFramePixel(static_cast<uint8_t>(y * 5 + x), on ? colorValue : 0x000000);
     }
   }
+}
+
+void drawMaskOverlay(const uint8_t rows[5], uint32_t colorValue) {
+  for (uint8_t y = 0; y < 5; ++y) {
+    for (uint8_t x = 0; x < 5; ++x) {
+      const bool on = (rows[y] >> (4 - x)) & 0x01;
+      if (!on) {
+        continue;
+      }
+
+      setFramePixel(static_cast<uint8_t>(y * 5 + x), colorValue);
+    }
+  }
+}
+
+void drawWaveRow(int8_t rowIndex, uint8_t rowMask, uint32_t colorValue) {
+  if (rowIndex < 0 || rowIndex > 4) {
+    return;
+  }
+
+  for (uint8_t x = 0; x < 5; ++x) {
+    const bool on = (rowMask >> (4 - x)) & 0x01;
+    if (!on) {
+      continue;
+    }
+
+    setFramePixel(static_cast<uint8_t>(rowIndex) * 5U + x, colorValue);
+  }
+}
+
+void drawPixel(int8_t x, int8_t y, uint32_t colorValue) {
+  if (x < 0 || x > 4 || y < 0 || y > 4) {
+    return;
+  }
+
+  setFramePixel(static_cast<uint8_t>(y) * 5U + static_cast<uint8_t>(x), colorValue);
+}
+
+void drawWifiCenterDot(uint32_t colorValue, uint8_t scale = 255) {
+  drawPixel(2, 2, scaleColor(colorValue, scale));
+}
+
+void drawWifiOuterRing(uint32_t colorValue,
+                       uint8_t edgeScale = 255,
+                       uint8_t cornerScale = 110) {
+  const uint32_t edgeColor = scaleColor(colorValue, edgeScale);
+  const uint32_t cornerColor = scaleColor(colorValue, cornerScale);
+
+  drawPixel(0, 0, cornerColor);
+  drawPixel(1, 0, edgeColor);
+  drawPixel(2, 0, edgeColor);
+  drawPixel(3, 0, edgeColor);
+  drawPixel(4, 0, cornerColor);
+
+  drawPixel(0, 1, edgeColor);
+  drawPixel(4, 1, edgeColor);
+  drawPixel(0, 2, edgeColor);
+  drawPixel(4, 2, edgeColor);
+  drawPixel(0, 3, edgeColor);
+  drawPixel(4, 3, edgeColor);
+
+  drawPixel(0, 4, cornerColor);
+  drawPixel(1, 4, edgeColor);
+  drawPixel(2, 4, edgeColor);
+  drawPixel(3, 4, edgeColor);
+  drawPixel(4, 4, cornerColor);
+}
+
+void drawWifiInnerRing(uint32_t colorValue,
+                       uint8_t cardinalScale = 144,
+                       uint8_t diagonalScale = 92) {
+  const uint32_t cardinalColor = scaleColor(colorValue, cardinalScale);
+  const uint32_t diagonalColor = scaleColor(colorValue, diagonalScale);
+
+  drawPixel(1, 1, diagonalColor);
+  drawPixel(2, 1, cardinalColor);
+  drawPixel(3, 1, diagonalColor);
+  drawPixel(1, 2, cardinalColor);
+  drawPixel(3, 2, cardinalColor);
+  drawPixel(1, 3, diagonalColor);
+  drawPixel(2, 3, cardinalColor);
+  drawPixel(3, 3, diagonalColor);
 }
 
 }  // namespace
 
 void clearAllPixels() {
-  fillAllPixels(0x000000);
+  clearFrameBuffer();
+  flushFrameBuffer();
 }
 
 void clearMatrix() {
-  for (uint8_t i = 0; i < kMatrixPixelCount; ++i) {
-    if (i == kBeatDotPixelIndex) {
-      continue;
-    }
-
-    M5.dis.drawpix(i, 0x000000);
-  }
+  clearFrameBuffer();
+  setFramePixel(kBeatDotPixelIndex, 0x000000);
+  flushFrameBuffer();
 }
 
 void clearBeatDotPixel() {
@@ -192,9 +307,10 @@ void clearBeatDotPixel() {
 }
 
 void drawSceneNumber(size_t sceneIndex) {
-  clearMatrix();
+  clearFrameBuffer();
 
   if (sceneIndex >= sceneSlotCount()) {
+    flushFrameBuffer();
     return;
   }
 
@@ -205,9 +321,11 @@ void drawSceneNumber(size_t sceneIndex) {
         continue;
       }
 
-      M5.dis.drawpix(y * 5 + x, scenePixelColor(sceneIndex, x, y));
+      setFramePixel(static_cast<uint8_t>(y * 5 + x), scenePixelColor(sceneIndex, x, y));
     }
   }
+
+  flushFrameBuffer();
 }
 
 void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
@@ -215,31 +333,121 @@ void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
 }
 
 void drawTextCharacter(uint8_t character, uint32_t colorValue) {
-  clearAllPixels();
+  clearFrameBuffer();
 
   const Glyph* glyph = glyphForCharacter(character);
   if (glyph == nullptr) {
+    flushFrameBuffer();
     return;
   }
 
   for (uint8_t y = 0; y < 5; ++y) {
     for (uint8_t x = 0; x < 5; ++x) {
       const bool on = (glyph->rows[y] >> (4 - x)) & 0x01;
-      M5.dis.drawpix(y * 5 + x, on ? colorValue : 0x000000);
+      setFramePixel(static_cast<uint8_t>(y * 5 + x), on ? colorValue : 0x000000);
     }
   }
+
+  flushFrameBuffer();
 }
 
 void drawWifiIcon(uint32_t colorValue) {
-  drawMask(kWifiIconMask, colorValue);
+  drawWifiConnectedIcon(colorValue);
+}
+
+void drawWifiConnectedIcon(uint32_t colorValue) {
+  clearFrameBuffer();
+  drawWifiOuterRing(colorValue, 220, 116);
+  drawWifiCenterDot(colorValue);
+  flushFrameBuffer();
+}
+
+void drawWifiConnectingIcon(uint32_t now, uint32_t colorValue) {
+  clearFrameBuffer();
+
+  const uint32_t pulsePhase = now % 720U;
+  const uint32_t pulseRamp = (pulsePhase < 360U) ? pulsePhase : (720U - pulsePhase);
+  const uint8_t centerScale =
+    static_cast<uint8_t>(72U + ((pulseRamp * 183U) / 360U));
+
+  const uint8_t frame = static_cast<uint8_t>((now / 115U) % 5U);
+
+  switch (frame) {
+    case 0:
+      break;
+
+    case 1:
+      drawWifiInnerRing(colorValue, 96, 56);
+      break;
+
+    case 2:
+      drawWifiInnerRing(colorValue, 144, 88);
+      break;
+
+    case 3:
+      drawWifiOuterRing(colorValue, 128, 68);
+      break;
+
+    case 4:
+    default:
+      drawWifiOuterRing(colorValue, 190, 104);
+      break;
+  }
+
+  drawWifiCenterDot(colorValue, centerScale);
+  flushFrameBuffer();
+}
+
+void drawWifiFailedIcon(uint32_t colorValue) {
+  clearFrameBuffer();
+  drawMask(kWifiFailedIconMask, colorValue);
+  flushFrameBuffer();
 }
 
 void drawSpeakerIcon(uint32_t colorValue) {
+  clearFrameBuffer();
   drawMask(kSpeakerIconMask, colorValue);
+  flushFrameBuffer();
 }
 
 void drawSpeakerMutedIcon(uint32_t colorValue) {
+  clearFrameBuffer();
   drawMask(kSpeakerMutedIconMask, colorValue);
+  flushFrameBuffer();
+}
+
+void drawAiWaveAnimation(uint32_t elapsedMs,
+                         uint32_t durationMs,
+                         bool bottomToTop,
+                         uint32_t colorValue) {
+  clearFrameBuffer();
+
+  if (durationMs == 0) {
+    flushFrameBuffer();
+    return;
+  }
+
+  const uint32_t clampedElapsed = (elapsedMs > durationMs) ? durationMs : elapsedMs;
+  uint8_t step = static_cast<uint8_t>((clampedElapsed * 7U) / durationMs);
+  if (step > 6U) {
+    step = 6U;
+  }
+
+  const int8_t brightRow = bottomToTop
+    ? static_cast<int8_t>(5 - step)
+    : static_cast<int8_t>(step - 1);
+  const int8_t nearTrailRow = bottomToTop ? (brightRow + 1) : (brightRow - 1);
+  const int8_t midTrailRow = bottomToTop ? (brightRow + 2) : (brightRow - 2);
+  const int8_t farTrailRow = bottomToTop ? (brightRow + 3) : (brightRow - 3);
+  const uint32_t nearTrailColor = scaleColor(colorValue, 138);
+  const uint32_t midTrailColor = scaleColor(colorValue, 84);
+  const uint32_t farTrailColor = scaleColor(colorValue, 36);
+
+  drawWaveRow(farTrailRow, 0b11111, farTrailColor);
+  drawWaveRow(midTrailRow, 0b11111, midTrailColor);
+  drawWaveRow(nearTrailRow, 0b11111, nearTrailColor);
+  drawWaveRow(brightRow, 0b11111, colorValue);
+  flushFrameBuffer();
 }
 
 }  // namespace decaflash::brain::matrix

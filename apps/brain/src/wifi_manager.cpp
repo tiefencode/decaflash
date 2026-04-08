@@ -25,12 +25,13 @@ static constexpr uint32_t kConnectPollMs = 250;
 static constexpr uint8_t kScanListLimit = 12;
 
 uint32_t wifiPulseColor(uint32_t now) {
-  const uint32_t cycleMs = 900;
+  const uint32_t cycleMs = 820;
   const uint32_t phase = now % cycleMs;
   const uint32_t halfCycleMs = cycleMs / 2U;
   const uint32_t ramp = (phase < halfCycleMs) ? phase : (cycleMs - phase);
-  const uint8_t green = static_cast<uint8_t>(90U + ((ramp * 120U) / halfCycleMs));
-  const uint8_t red = static_cast<uint8_t>(70U + ((ramp * 110U) / halfCycleMs));
+  const uint32_t intensity = (ramp * 255U) / halfCycleMs;
+  const uint8_t red = static_cast<uint8_t>(35U + ((intensity * 220U) / 255U));
+  const uint8_t green = static_cast<uint8_t>(12U + ((intensity * 208U) / 255U));
   return (static_cast<uint32_t>(red) << 16) |
          (static_cast<uint32_t>(green) << 8);
 }
@@ -145,17 +146,15 @@ bool connect() {
   }
 
   Serial.println("wifi=connect note=may_affect_espnow_channel");
+  decaflash::brain::matrix::drawWifiConnectingIcon(millis(), wifiPulseColor(millis()));
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
   delay(150);
-
-  const bool ssidVisible = targetSsidVisible(false);
-  Serial.printf("wifi=target visible=%s\n", ssidVisible ? "yes" : "no");
   WiFi.begin(decaflash::secrets::kWifiSsid, decaflash::secrets::kWifiPassword);
 
   const uint32_t startedAtMs = millis();
   while ((millis() - startedAtMs) < kConnectTimeoutMs) {
-    decaflash::brain::matrix::drawWifiIcon(wifiPulseColor(millis()));
+    decaflash::brain::matrix::drawWifiConnectingIcon(millis(), wifiPulseColor(millis()));
 
     if (isConnected()) {
       Serial.printf("wifi=connected ssid=%s ip=%s rssi=%d\n",

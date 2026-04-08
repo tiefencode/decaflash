@@ -108,7 +108,7 @@ uint32_t textDisplayDurationMs(char character) {
   return (character == ' ') ? kSpaceDisplayMs : kCharacterDisplayMs;
 }
 
-void startTextPlayback(const char* rawText) {
+void startTextPlayback(const char* rawText, uint32_t delayMs) {
   if (rawText == nullptr) {
     stopTextPlayback();
     return;
@@ -129,7 +129,7 @@ void startTextPlayback(const char* rawText) {
   textPlaybackLength = length;
   textPlaybackIndex = 0;
   textPlaybackCharacterVisible = false;
-  nextTextPlaybackAtMs = 0;
+  nextTextPlaybackAtMs = millis() + delayMs;
   textPlaybackActive = length > 0;
 
   if (!textPlaybackActive) {
@@ -146,8 +146,8 @@ bool isActive() {
   return textPlaybackActive;
 }
 
-bool start(const char* text) {
-  startTextPlayback(text);
+bool start(const char* text, uint32_t delayMs) {
+  startTextPlayback(text, delayMs);
   return textPlaybackActive;
 }
 

@@ -363,6 +363,52 @@ const int16_t* PdmMicrophone::recordedSamples() const {
   return recordingBuffer_;
 }
 
+bool PdmMicrophone::takeRecording(int16_t*& samples,
+                                  size_t& sampleCount,
+                                  uint32_t& sampleRateHz) {
+  samples = nullptr;
+  sampleCount = 0;
+  sampleRateHz = 0;
+
+  if (!recordingReady_ || recordingBuffer_ == nullptr || recordingSampleCount_ == 0) {
+    return false;
+  }
+
+  samples = recordingBuffer_;
+  sampleCount = recordingSampleCount_;
+  sampleRateHz = kRecordingStoredSampleRateHz;
+
+  recordingBuffer_ = nullptr;
+  recordingBufferCapacity_ = 0;
+  recordingReady_ = false;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingTargetSampleCount_ = 0;
+  recordingInputSampleCount_ = 0;
+  requestedRecordingDurationMs_ = 0;
+  return true;
+}
+
+bool PdmMicrophone::cancelRecording() {
+  if (!recordingRequested_ && !recordingActive_ && !recordingReady_) {
+    return false;
+  }
+
+  const bool wasActive = recordingActive_;
+  recordingRequested_ = false;
+  recordingActive_ = false;
+  recordingReady_ = false;
+  recordingStartedAtMs_ = 0;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingTargetSampleCount_ = 0;
+  recordingInputSampleCount_ = 0;
+  requestedRecordingDurationMs_ = 0;
+
+  Serial.printf("record=cancel state=%s\n", wasActive ? "active" : "pending");
+  return true;
+}
+
 void PdmMicrophone::clearRecording() {
   recordingReady_ = false;
   recordingFinishedAtMs_ = 0;
