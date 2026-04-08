@@ -236,7 +236,8 @@ function integerField(value) {
 }
 
 async function getDebugAsset(cacheUrl) {
-  const response = await caches.default.match(cacheUrl);
+  const cacheKey = new Request(cacheUrl, { method: "GET" });
+  const response = await caches.default.match(cacheKey);
   if (!response) {
     return jsonResponse({ error: "debug_asset_not_found" }, 404);
   }
@@ -258,21 +259,27 @@ async function storeDebugArtifacts(requestInfo, wavBytes, upstreamInfo) {
     headers: {
       "content-type": "audio/wav",
       "content-disposition": 'attachment; filename="decaflash-last.wav"',
-      "cache-control": `private, max-age=${DEBUG_CACHE_SECONDS}`,
+      "cache-control": `public, max-age=${DEBUG_CACHE_SECONDS}`,
     },
   });
 
   const jsonResponseBody = new Response(JSON.stringify(metadata, null, 2), {
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": `private, max-age=${DEBUG_CACHE_SECONDS}`,
+      "cache-control": `public, max-age=${DEBUG_CACHE_SECONDS}`,
     },
   });
 
+  const wavCacheKey = new Request(DEBUG_WAV_CACHE_URL, { method: "GET" });
+  const jsonCacheKey = new Request(DEBUG_JSON_CACHE_URL, { method: "GET" });
   await Promise.all([
-    caches.default.put(DEBUG_WAV_CACHE_URL, wavResponse),
-    caches.default.put(DEBUG_JSON_CACHE_URL, jsonResponseBody),
+    caches.default.put(wavCacheKey, wavResponse),
+    caches.default.put(jsonCacheKey, jsonResponseBody),
   ]);
+
+  console.log(
+    `debug=stored wav_bytes=${wavBytes.byteLength} sample_count=${metadata.sample_count ?? 0}`,
+  );
 }
 
 function clamp(value, min, max) {
