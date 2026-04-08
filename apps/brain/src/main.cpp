@@ -109,6 +109,7 @@ portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
 bool buttonPressedLastLoop = false;
 bool buttonLongPressHandled = false;
 uint32_t buttonPressedAtMs = 0;
+bool lastRadioPauseActive = false;
 bool lastWifiConnectedForEspNow = false;
 uint8_t lastWifiChannelForEspNow = 0;
 bool espNowBlockedByChannel = false;
@@ -443,6 +444,15 @@ void serviceEspNowState(uint32_t now) {
   recoverEspNowIfNeeded(now);
 }
 
+void serviceManagedRadioPauseTransition() {
+  const bool radioPauseActive = decaflash::brain::api_client::radioPauseActive();
+  if (lastRadioPauseActive && !radioPauseActive) {
+    requestEspNowRecovery("wifi_session_ended");
+  }
+
+  lastRadioPauseActive = radioPauseActive;
+}
+
 void resetAudioClockFollow() {
   audioClockLocked = false;
   audioSyncCandidateCount = 0;
@@ -753,6 +763,7 @@ void updateIdleMatrixUi(uint32_t now) {
 
 void onBeat() {
   const uint8_t currentBeat = beatInBar;
+  const bool periodicBarSync = currentBeat == 1;
 
   beatDotBeat = currentBeat;
   beatDotColorOverride = syncBeatDotPending ? 0xFF0000 : 0;
@@ -761,7 +772,7 @@ void onBeat() {
 
   if (!decaflash::brain::api_client::radioPauseActive() &&
       espNowReady &&
-      pendingClockSync) {
+      (pendingClockSync || periodicBarSync)) {
     const auto sync = makeClockSyncMessage(
       clockRevision,
       ++beatSerial,
@@ -987,6 +998,7 @@ void loop() {
   decaflash::brain::shell::serviceSerialInput();
   microphone.update();
   decaflash::brain::api_client::service(now);
+  serviceManagedRadioPauseTransition();
   handleButtonInput(now);
   if (microphone.recordingReady()) {
     decaflash::brain::RecordedAudioClip recording = {};

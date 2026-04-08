@@ -35,17 +35,15 @@ static constexpr size_t kCloudJsonPayloadCapacity = 512;
 static constexpr uint32_t kCloudTextDisplayDelayMs = 320;
 static constexpr uint32_t kCloudWorkerStackWords = 12288;
 static constexpr BaseType_t kCloudWorkerPriority = 1;
-static constexpr uint16_t kCloudConnectTimeoutMs = 12000;
-static constexpr uint16_t kCloudRequestTimeoutMs = 30000;
-static constexpr uint16_t kCloudResponseIdleTimeoutMs = 750;
+// Keep Wi-Fi join tolerant, but fail cloud work faster so AI does not hold the
+// ESP-NOW core path paused for too long.
+static constexpr uint16_t kCloudConnectTimeoutMs = 8000;
+static constexpr uint16_t kCloudRequestTimeoutMs = 15000;
+static constexpr uint16_t kCloudResponseIdleTimeoutMs = 500;
 static constexpr char kCloudChattieMonitorPrompt[] =
   "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. "
   "Nutze die Nutzereingabe als Inspiration. Keine Erklaerung. Keine Emojis. "
   "Maximal 8 Woerter.";
-static constexpr char kCloudChattieSongPrompt[] =
-  "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. "
-  "Nutze nur Songtitel und Artist als Inspiration. Keine Lyrics. Keine Zitate. "
-  "Keine Erklaerung. Keine Emojis. Maximal 8 Woerter.";
 static constexpr char kCloudMultipartBoundary[] = "----decaflash-boundary-7e8db64a";
 
 enum class CloudJobType : uint8_t {
@@ -686,32 +684,16 @@ bool postCloudStream(HTTPClient& http,
   return true;
 }
 
-bool fetchCloudGeneratedSongText(const char* title,
-                                 const char* artist,
-                                 char* destination,
-                                 size_t capacity) {
-  if (capacity == 0 || title == nullptr || artist == nullptr) {
-    return false;
-  }
-
-  char input[240] = {};
-  snprintf(input, sizeof(input), "Titel: %s\nArtist: %s", title, artist);
-  return fetchCloudChattieText(input, kCloudChattieSongPrompt, destination, capacity);
-}
-
-bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
-                                         char* title,
-                                         size_t titleCapacity,
-                                         char* artist,
-                                         size_t artistCapacity) {
+bool fetchCloudSongTextFromRecording(const RecordedAudioClip& recording,
+                                     char* destination,
+                                     size_t capacity) {
   if (recording.data == nullptr || recording.byteCount == 0 ||
       recording.sampleCount == 0 || recording.sampleRateHz == 0 ||
-      titleCapacity == 0 || artistCapacity == 0) {
+      destination == nullptr || capacity == 0) {
     return false;
   }
 
-  title[0] = '\0';
-  artist[0] = '\0';
+  destination[0] = '\0';
 
   char auddUrl[160] = {};
   if (!deriveCloudAuddUrl(auddUrl, sizeof(auddUrl))) {
@@ -812,13 +794,21 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
     return false;
   }
 
-  if (!extractJsonStringField(body, "title", title, titleCapacity) ||
-      !extractJsonStringField(body, "artist", artist, artistCapacity)) {
+  char title[kCloudTitleCapacity] = {};
+  char artist[kCloudArtistCapacity] = {};
+  if (!extractJsonStringField(body, "title", title, sizeof(title)) ||
+      !extractJsonStringField(body, "artist", artist, sizeof(artist))) {
     Serial.println("API: audd_parse_failed expected=title_and_artist");
     return false;
   }
 
+  if (!extractJsonStringField(body, "text", destination, capacity)) {
+    Serial.println("API: audd_parse_failed expected=text");
+    return false;
+  }
+
   Serial.printf("API: audd_match artist=\"%s\" title=\"%s\"\n", artist, title);
+  Serial.printf("API: audd_text text=\"%s\"\n", destination);
   return true;
 }
 
@@ -919,21 +909,10 @@ void cloudWorkerTask(void* parameter) {
         break;
 
       case CloudJobType::RecordedAudio: {
-        char title[kCloudTitleCapacity] = {};
-        char artist[kCloudArtistCapacity] = {};
-        if (fetchCloudSongMetadataFromRecording(
+        processed = fetchCloudSongTextFromRecording(
               localJob.recording,
-              title,
-              sizeof(title),
-              artist,
-              sizeof(artist))) {
-          releaseRecordedAudioClip(localJob.recording);
-          processed = fetchCloudGeneratedSongText(
-            title,
-            artist,
-            displayText,
-            sizeof(displayText));
-        }
+              displayText,
+              sizeof(displayText));
         break;
       }
 

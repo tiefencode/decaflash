@@ -72,6 +72,7 @@ Response:
 {
   "matched": true,
   "title": "Song Title",
-  "artist": "Artist Name"
+  "artist": "Artist Name",
+  "text": "Kurzer Matrix-Text"
 }
 ```

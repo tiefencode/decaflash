@@ -19,6 +19,10 @@ const DEBUG_JSON_CACHE_URL = "https://decaflash-debug.internal/api/debug/last.js
 const DEBUG_CACHE_SECONDS = 3600;
 const DEBUG_WAV_KV_KEY = "debug:last:wav";
 const DEBUG_JSON_KV_KEY = "debug:last:json";
+const CHATTIE_SONG_PROMPT =
+  "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. " +
+  "Nutze nur Songtitel und Artist als Inspiration. Keine Lyrics. Keine Zitate. " +
+  "Keine Erklaerung. Keine Emojis. Maximal 8 Woerter.";
 
 export default {
   async fetch(request, env) {
@@ -95,10 +99,6 @@ async function handleChattie(request, env) {
     return jsonResponse({ error: "method_not_allowed" }, 405);
   }
 
-  if (!env.OPENAI_API_KEY) {
-    return jsonResponse({ error: "missing_openai_api_key" }, 500);
-  }
-
   const body = await request.json();
   const input = typeof body?.input === "string" ? body.input.trim() : "";
   const instructions = typeof body?.instructions === "string" ? body.instructions.trim() : "";
@@ -107,31 +107,12 @@ async function handleChattie(request, env) {
     return jsonResponse({ error: "invalid_request" }, 400);
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: env.OPENAI_MODEL || "gpt-4.1-mini",
-      instructions,
-      input,
-      max_output_tokens: 80,
-    }),
-  });
-
-  if (!response.ok) {
-    return await upstreamJsonError("openai_failed", response);
+  const generated = await generateChattieText(env, input, instructions);
+  if (generated instanceof Response) {
+    return generated;
   }
 
-  const data = await response.json();
-  const text = extractResponseText(data).trim();
-  if (!text) {
-    return jsonResponse({ error: "openai_empty_text" }, 502);
-  }
-
-  return jsonResponse({ text });
+  return jsonResponse({ text: generated });
 }
 
 async function handleAudd(request, env) {
@@ -219,19 +200,72 @@ async function handleAudd(request, env) {
     title: typeof result?.title === "string" ? result.title : "",
     artist: typeof result?.artist === "string" ? result.artist : "",
   };
-  await storeDebugArtifacts(env, requestInfo, debugWavBytes, upstreamInfo);
 
   if (!result) {
+    await storeDebugArtifacts(env, requestInfo, debugWavBytes, upstreamInfo);
     return jsonResponse({ matched: false });
   }
 
+  const title = typeof result.title === "string" ? result.title : "";
+  const artist = typeof result.artist === "string" ? result.artist : "";
+  const generated = await generateChattieText(
+    env,
+    buildSongTextInput(title, artist),
+    CHATTIE_SONG_PROMPT,
+  );
+  if (generated instanceof Response) {
+    upstreamInfo.text = "";
+    await storeDebugArtifacts(env, requestInfo, debugWavBytes, upstreamInfo);
+    return generated;
+  }
+
+  upstreamInfo.text = generated;
+  await storeDebugArtifacts(env, requestInfo, debugWavBytes, upstreamInfo);
+
   return jsonResponse({
     matched: true,
-    title: typeof result.title === "string" ? result.title : "",
-    artist: typeof result.artist === "string" ? result.artist : "",
+    title,
+    artist,
     album: typeof result.album === "string" ? result.album : "",
     release_date: typeof result.release_date === "string" ? result.release_date : "",
+    text: generated,
   });
+}
+
+function buildSongTextInput(title, artist) {
+  return `Titel: ${title}\nArtist: ${artist}`;
+}
+
+async function generateChattieText(env, input, instructions) {
+  if (!env.OPENAI_API_KEY) {
+    return jsonResponse({ error: "missing_openai_api_key" }, 500);
+  }
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-4.1-mini",
+      instructions,
+      input,
+      max_output_tokens: 80,
+    }),
+  });
+
+  if (!response.ok) {
+    return await upstreamJsonError("openai_failed", response);
+  }
+
+  const data = await response.json();
+  const text = extractResponseText(data).trim();
+  if (!text) {
+    return jsonResponse({ error: "openai_empty_text" }, 502);
+  }
+
+  return text;
 }
 
 function stringField(value) {
