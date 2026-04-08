@@ -174,7 +174,7 @@ bool PdmMicrophone::begin() {
 
   const esp_err_t installResult = i2s_driver_install(kMicPort, &config, 0, nullptr);
   if (installResult != ESP_OK) {
-    Serial.printf("mic=setup step=driver_install err=%d\n", static_cast<int>(installResult));
+    Serial.printf("MIC: setup step=driver_install err=%d\n", static_cast<int>(installResult));
     return false;
   }
 
@@ -186,14 +186,14 @@ bool PdmMicrophone::begin() {
 
   const esp_err_t pinResult = i2s_set_pin(kMicPort, &pinConfig);
   if (pinResult != ESP_OK) {
-    Serial.printf("mic=setup step=set_pin err=%d\n", static_cast<int>(pinResult));
+    Serial.printf("MIC: setup step=set_pin err=%d\n", static_cast<int>(pinResult));
     i2s_driver_uninstall(kMicPort);
     return false;
   }
 
   const esp_err_t downSampleResult = i2s_set_pdm_rx_down_sample(kMicPort, I2S_PDM_DSR_16S);
   if (downSampleResult != ESP_OK) {
-    Serial.printf("mic=setup step=downsample err=%d\n", static_cast<int>(downSampleResult));
+    Serial.printf("MIC: setup step=downsample err=%d\n", static_cast<int>(downSampleResult));
     i2s_driver_uninstall(kMicPort);
     return false;
   }
@@ -204,7 +204,7 @@ bool PdmMicrophone::begin() {
   lastReportAtMs_ = millis();
   lastFramePrintAtMs_ = millis();
 
-  Serial.printf("mic=ready data_pin=%d clock_pin=%d sample_rate=%lu dma=%ux%u\n",
+  Serial.printf("MIC: ready data_pin=%d clock_pin=%d sample_rate=%lu dma=%ux%u\n",
                 static_cast<int>(kMicDataPin),
                 static_cast<int>(kMicClockPin),
                 static_cast<unsigned long>(kSampleRateHz),
@@ -241,7 +241,7 @@ void PdmMicrophone::update() {
 
     if (readResult != ESP_OK) {
       if (!reportedReadError_) {
-        Serial.printf("mic=read err=%d\n", static_cast<int>(readResult));
+        Serial.printf("MIC: read err=%d\n", static_cast<int>(readResult));
         reportedReadError_ = true;
       }
       break;
@@ -275,12 +275,12 @@ void PdmMicrophone::update() {
 
 bool PdmMicrophone::requestRecording(uint32_t durationMs) {
   if (!ready_) {
-    Serial.println("record=abort reason=mic_not_ready");
+    Serial.println("RECORD: abort reason=mic_not_ready");
     return false;
   }
 
   if (recordingActive_) {
-    Serial.printf("record=busy samples=%u\n",
+    Serial.printf("RECORD: busy samples=%u\n",
                   static_cast<unsigned>(recordingSampleCount_));
     return false;
   }
@@ -291,7 +291,7 @@ bool PdmMicrophone::requestRecording(uint32_t durationMs) {
 
   if (durationMs < kMinimumRecordingDurationMs ||
       durationMs > kMaximumRecordingDurationMs) {
-    Serial.printf("record=invalid_duration expected=%lu..%lu\n",
+    Serial.printf("RECORD: invalid_duration expected=%lu..%lu\n",
                   static_cast<unsigned long>(kMinimumRecordingDurationMs),
                   static_cast<unsigned long>(kMaximumRecordingDurationMs));
     return false;
@@ -316,7 +316,7 @@ bool PdmMicrophone::requestRecording(uint32_t durationMs) {
   }
 
   if (recordingBuffer_ == nullptr || targetSampleCount < minimumSampleCount) {
-    Serial.printf("record=abort reason=no_memory bytes=%u\n",
+    Serial.printf("RECORD: abort reason=no_memory bytes=%u\n",
                   static_cast<unsigned>(requestedSampleCount));
     return false;
   }
@@ -325,7 +325,7 @@ bool PdmMicrophone::requestRecording(uint32_t durationMs) {
     durationMs = static_cast<uint32_t>(
       (static_cast<uint64_t>(targetSampleCount) * 1000ULL) / kRecordingStoredSampleRateHz
     );
-    Serial.printf("record=clamp duration_ms=%lu\n",
+    Serial.printf("RECORD: clamp duration_ms=%lu\n",
                   static_cast<unsigned long>(durationMs));
   }
 
@@ -335,7 +335,7 @@ bool PdmMicrophone::requestRecording(uint32_t durationMs) {
   recordingReady_ = false;
   recordingFinishedAtMs_ = 0;
   recordingSampleCount_ = 0;
-  Serial.printf("record=request duration_ms=%lu\n",
+  Serial.printf("RECORD: request duration_ms=%lu\n",
                 static_cast<unsigned long>(durationMs));
   return true;
 }
@@ -405,7 +405,7 @@ bool PdmMicrophone::cancelRecording() {
   requestedRecordingDurationMs_ = 0;
   resetRecordingEncoding();
 
-  Serial.printf("record=cancel state=%s\n", wasActive ? "active" : "pending");
+  Serial.printf("RECORD: cancel state=%s\n", wasActive ? "active" : "pending");
   return true;
 }
 
@@ -488,7 +488,7 @@ void PdmMicrophone::beginRequestedRecording(uint32_t now) {
   recordingInputSampleCount_ = 0;
   resetRecordingEncoding();
 
-  Serial.printf("record=start duration_ms=%lu target_samples=%u sample_rate=%lu\n",
+  Serial.printf("RECORD: start duration_ms=%lu target_samples=%u sample_rate=%lu\n",
                 static_cast<unsigned long>(requestedRecordingDurationMs_),
                 static_cast<unsigned>(recordingTargetSampleCount_),
                 static_cast<unsigned long>(kRecordingStoredSampleRateHz));
@@ -504,7 +504,7 @@ void PdmMicrophone::finishRecording(uint32_t now) {
     kRecordingStoredSampleRateHz
   );
 
-  Serial.printf("record=done duration_ms=%lu samples=%u bytes=%u elapsed_ms=%lu format=mulaw\n",
+  Serial.printf("RECORD: done duration_ms=%lu samples=%u bytes=%u elapsed_ms=%lu format=mulaw\n",
                 static_cast<unsigned long>(capturedDurationMs),
                 static_cast<unsigned>(recordingSampleCount_),
                 static_cast<unsigned>(recordingSampleCount_),
@@ -574,7 +574,7 @@ void PdmMicrophone::accumulateSamples(const int16_t* samples, size_t sampleCount
         recordingTargetSampleCount_ = 0;
         requestedRecordingDurationMs_ = 0;
         resetRecordingEncoding();
-        Serial.println("record=abort reason=no_memory");
+        Serial.println("RECORD: abort reason=no_memory");
         break;
       }
     }
@@ -1270,7 +1270,7 @@ void PdmMicrophone::updateMeterLevel(uint32_t blockLevel) {
 
 bool startMicrophoneRecording(uint32_t durationMs) {
   if (gPrimaryMicrophone == nullptr) {
-    Serial.println("record=abort reason=mic_not_available");
+    Serial.println("RECORD: abort reason=mic_not_available");
     return false;
   }
 

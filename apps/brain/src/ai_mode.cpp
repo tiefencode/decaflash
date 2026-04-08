@@ -13,7 +13,6 @@ namespace decaflash::brain::ai_mode {
 namespace {
 
 static constexpr uint32_t kTogglePressMs = 1200;
-static constexpr uint32_t kWifiConnectedDisplayMs = 1000;
 static constexpr uint32_t kWifiFailedDisplayMs = 1500;
 static constexpr uint32_t kToggleDisplayMs = 780;
 static constexpr uint32_t kMusicStableMs = 1500;
@@ -34,7 +33,6 @@ enum class TransientIcon : uint8_t {
 
 bool aiModeEnabled = false;
 bool aiRecordingOwned = false;
-uint32_t aiNextWifiRetryAtMs = 0;
 uint32_t aiReadyToListenAtMs = 0;
 uint32_t aiCooldownUntilMs = 0;
 uint32_t aiMusicPresentSinceAtMs = 0;
@@ -101,7 +99,7 @@ void setCooldown(uint32_t now, uint32_t durationMs, const char* reason) {
   aiCooldownUntilMs = now + durationMs;
   aiReadyToListenAtMs = 0;
   resetListeningWindow();
-  Serial.printf("ai=cooldown reason=%s ms=%lu\n",
+  Serial.printf("AI: cooldown reason=%s ms=%lu\n",
                 reason,
                 static_cast<unsigned long>(durationMs));
 }
@@ -111,12 +109,11 @@ void disableForWifiFailure(uint32_t now, const char* reason) {
   aiModeEnabled = false;
   decaflash::brain::api_client::cancelAiWork();
   aiRecordingOwned = false;
-  aiNextWifiRetryAtMs = 0;
   aiReadyToListenAtMs = 0;
   aiCooldownUntilMs = 0;
   resetListeningWindow();
   showTransientIcon(TransientIcon::WifiFailed, 0xFF0000, kWifiFailedDisplayMs);
-  Serial.printf("ai=disabled reason=%s\n", reason);
+  Serial.printf("AI: disabled reason=%s\n", reason);
 }
 
 }  // namespace
@@ -127,27 +124,21 @@ uint32_t togglePressMs() {
 
 void toggle(uint32_t now, PdmMicrophone& microphone) {
   aiModeEnabled = !aiModeEnabled;
-  aiNextWifiRetryAtMs = 0;
   aiReadyToListenAtMs = 0;
   aiCooldownUntilMs = 0;
   resetListeningWindow();
 
   if (aiModeEnabled) {
-    Serial.println("ai=enabled");
+    Serial.println("AI: enabled");
     showTransientIcon(TransientIcon::AiEnabled, 0x00FF00, kToggleDisplayMs);
-
-    if (decaflash::brain::wifi_manager::isConnected()) {
-      aiReadyToListenAtMs = now + kToggleDisplayMs;
-    } else {
-      aiNextWifiRetryAtMs = now + kToggleDisplayMs;
-    }
+    aiReadyToListenAtMs = now + kToggleDisplayMs;
     return;
   }
 
   microphone.cancelRecording();
   decaflash::brain::api_client::cancelAiWork();
   aiRecordingOwned = false;
-  Serial.println("ai=disabled");
+  Serial.println("AI: disabled");
   showTransientIcon(TransientIcon::AiDisabled, 0xFF0000, kToggleDisplayMs);
 }
 
@@ -170,23 +161,6 @@ void service(uint32_t now, const PdmMicrophone& microphone) {
     }
 
     aiCooldownUntilMs = 0;
-  }
-
-  if (!decaflash::brain::wifi_manager::isConnected()) {
-    if ((int32_t)(now - aiNextWifiRetryAtMs) < 0) {
-      return;
-    }
-
-    const bool connected = decaflash::brain::wifi_manager::connect();
-    const uint32_t finishedAtMs = millis();
-    if (connected) {
-      showTransientIcon(TransientIcon::WifiConnected, 0x00FF00, kWifiConnectedDisplayMs);
-      aiReadyToListenAtMs = finishedAtMs + kWifiConnectedDisplayMs;
-      aiNextWifiRetryAtMs = 0;
-    } else {
-      disableForWifiFailure(finishedAtMs, "wifi_connect_failed");
-    }
-    return;
   }
 
   if (aiReadyToListenAtMs != 0) {
@@ -237,7 +211,7 @@ void service(uint32_t now, const PdmMicrophone& microphone) {
 
   aiRecordingOwned = true;
   resetListeningWindow();
-  Serial.printf("ai=record duration_ms=%lu trigger=%s bpm=%u conf=%u\n",
+  Serial.printf("AI: record duration_ms=%lu trigger=%s bpm=%u conf=%u\n",
                 static_cast<unsigned long>(kRecordDurationMs),
                 fallbackReady ? "fallback" : "beat",
                 static_cast<unsigned>(microphone.detectedBpm()),

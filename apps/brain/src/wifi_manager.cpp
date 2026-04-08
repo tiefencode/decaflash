@@ -64,7 +64,7 @@ const char* statusName(wl_status_t status) {
 bool targetSsidVisible(bool verbose) {
   const int networkCount = WiFi.scanNetworks(false, true);
   if (verbose) {
-    Serial.printf("wifi=scan count=%d\n", networkCount);
+    Serial.printf("WIFI: scan count=%d\n", networkCount);
   }
 
   if (networkCount <= 0) {
@@ -79,7 +79,7 @@ bool targetSsidVisible(bool verbose) {
     const uint8_t channel = WiFi.channel(i);
 
     if (verbose) {
-      Serial.printf("wifi=scan ssid=%s rssi=%ld ch=%u\n",
+      Serial.printf("WIFI: scan ssid=%s rssi=%ld ch=%u\n",
                     ssid.c_str(),
                     static_cast<long>(rssi),
                     static_cast<unsigned>(channel));
@@ -91,7 +91,7 @@ bool targetSsidVisible(bool verbose) {
   }
 
   if (verbose && networkCount > printedCount) {
-    Serial.printf("wifi=scan more=%d\n", networkCount - printedCount);
+    Serial.printf("WIFI: scan more=%d\n", networkCount - printedCount);
   }
 
   WiFi.scanDelete();
@@ -112,14 +112,18 @@ bool isConnected() {
   return WiFi.status() == WL_CONNECTED;
 }
 
+uint8_t currentChannel() {
+  return isConnected() ? static_cast<uint8_t>(WiFi.channel()) : 0;
+}
+
 bool connect() {
   if (!credentialsAvailable()) {
-    Serial.println("wifi=missing_credentials file=include/wifi_credentials.h");
+    Serial.println("WIFI: missing_credentials file=include/wifi_credentials.h");
     return false;
   }
 
   if (isConnected()) {
-    Serial.printf("wifi=connected ssid=%s ip=%s\n",
+    Serial.printf("WIFI: connected ssid=%s ip=%s\n",
                   WiFi.SSID().c_str(),
                   WiFi.localIP().toString().c_str());
     return true;
@@ -136,7 +140,7 @@ bool connect() {
     decaflash::brain::matrix::drawWifiConnectingIcon(millis(), wifiPulseColor(millis()));
 
     if (isConnected()) {
-      Serial.printf("wifi=connected ssid=%s ip=%s rssi=%d\n",
+      Serial.printf("WIFI: connected ssid=%s ip=%s rssi=%d\n",
                     WiFi.SSID().c_str(),
                     WiFi.localIP().toString().c_str(),
                     WiFi.RSSI());
@@ -147,7 +151,7 @@ bool connect() {
   }
 
   const wl_status_t status = WiFi.status();
-  Serial.printf("wifi=connect_failed status=%d name=%s\n",
+  Serial.printf("WIFI: connect_failed status=%d name=%s\n",
                 static_cast<int>(status),
                 statusName(status));
   return false;
@@ -156,7 +160,7 @@ bool connect() {
 void disconnect() {
   if (!isConnected()) {
     const wl_status_t status = WiFi.status();
-    Serial.printf("wifi=idle status=%d name=%s\n",
+    Serial.printf("WIFI: idle status=%d name=%s\n",
                   static_cast<int>(status),
                   statusName(status));
     return;
@@ -164,7 +168,7 @@ void disconnect() {
 
   const String ssid = WiFi.SSID();
   WiFi.disconnect(true, false);
-  Serial.printf("wifi=disconnected ssid=%s\n", ssid.c_str());
+  Serial.printf("WIFI: disconnected ssid=%s\n", ssid.c_str());
 }
 
 void scan() {
@@ -174,7 +178,7 @@ void scan() {
 
 void printStatus() {
   if (isConnected()) {
-    Serial.printf("wifi=status connected ssid=%s ip=%s rssi=%d\n",
+    Serial.printf("WIFI: status connected ssid=%s ip=%s rssi=%d\n",
                   WiFi.SSID().c_str(),
                   WiFi.localIP().toString().c_str(),
                   WiFi.RSSI());
@@ -182,7 +186,7 @@ void printStatus() {
   }
 
   const wl_status_t status = WiFi.status();
-  Serial.printf("wifi=status disconnected wl=%d name=%s credentials=%s\n",
+  Serial.printf("WIFI: status disconnected wl=%d name=%s credentials=%s\n",
                 static_cast<int>(status),
                 statusName(status),
                 credentialsAvailable() ? "yes" : "no");

@@ -68,7 +68,7 @@ void handleCommand(const char* commandLine) {
   }
 
   if (strcmp(commandLine, "chattie") == 0) {
-    Serial.println("serial=hint usage=chattie <text>");
+    Serial.println("SERIAL: hint usage=chattie <text>");
     return;
   }
 
@@ -86,7 +86,7 @@ void handleCommand(const char* commandLine) {
     char* end = nullptr;
     const unsigned long durationMs = strtoul(commandLine + 7, &end, 10);
     if (end == (commandLine + 7) || (end != nullptr && *end != '\0')) {
-      Serial.println("serial=hint usage=record [duration_ms]");
+      Serial.println("SERIAL: hint usage=record [duration_ms]");
       return;
     }
 
@@ -115,14 +115,14 @@ void handleCommand(const char* commandLine) {
     return;
   }
 
-  Serial.printf("serial=unknown cmd=\"%s\"\n", commandLine);
+  Serial.printf("SERIAL: unknown cmd=\"%s\"\n", commandLine);
   printHelp();
 }
 
 }  // namespace
 
 void printHelp() {
-  Serial.println("serial=commands");
+  Serial.println("SERIAL: commands");
   Serial.println("  help");
   Serial.println("  text <message>");
   Serial.println("  text clear");
@@ -186,7 +186,7 @@ void serviceSerialInput() {
       Serial.print("\r\n");
       promptVisible = false;
       serialCommandBuffer[serialCommandLength] = '\0';
-      Serial.printf("serial=drop cmd_too_long=\"%s\"\n", serialCommandBuffer);
+      Serial.printf("SERIAL: drop cmd_too_long=\"%s\"\n", serialCommandBuffer);
       serialCommandLength = 0;
       serialCommandBuffer[0] = '\0';
       printPrompt();

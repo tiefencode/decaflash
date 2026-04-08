@@ -42,7 +42,7 @@ static constexpr char kConfigNamespace[] = "decaflash";
 static constexpr char kConfigNodeKindKey[] = "node_kind";
 static constexpr char kConfigNodeEffectKey[] = "node_effect";
 static constexpr size_t kSerialLineCapacity = 48;
-static constexpr uint32_t NODE_STATUS_INTERVAL_MS = 5000;
+static constexpr uint32_t NODE_STATUS_INTERVAL_MS = 30000;
 static constexpr uint32_t FILTER_MONITOR_INTERVAL_MS = 5000;
 static constexpr int BUTTON_PIN = 39;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
@@ -399,7 +399,7 @@ bool isBrainOwned(RunMode mode) {
 
 void logFlashVariationChange(uint32_t bar) {
   (void)bar;
-  Serial.printf("FLASH=%s\n", activeFlashRenderCommand.name);
+  Serial.printf("FLASH: %s\n", activeFlashRenderCommand.name);
 }
 
 void resetFlashBurst() {
@@ -458,7 +458,7 @@ void sendNodeStatus(const char* reason) {
   );
 
   if (result != ESP_OK || strcmp(reason, "heartbeat") != 0) {
-    Serial.printf("send=node_status result=%d reason=%s kind=%s role=%s profile_rev=%u scene=",
+    Serial.printf("SEND: node_status result=%d reason=%s kind=%s role=%s profile_rev=%u scene=",
                   result,
                   reason,
                   nodeKindName(nodeIdentity.nodeKind),
@@ -660,24 +660,24 @@ void printHelp() {
 void printStatus() {
   Serial.println();
   Serial.println("-----");
-  Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
-  Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
-  Serial.printf("renderer=%s\n", renderer.rendererName());
+  Serial.printf("NODE: mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
+  Serial.printf("NODE: role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
+  Serial.printf("RENDERER: %s\n", renderer.rendererName());
   if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
-    Serial.printf("scene=%u/%u name=%s profile=%s motif=%s\n",
+    Serial.printf("SCENE: %u/%u name=%s profile=%s motif=%s\n",
                   static_cast<unsigned>(currentProgram + 1),
                   static_cast<unsigned>(currentProgramCount),
                   sceneName(currentProgram),
                   activeFlashCommand.name,
                   activeFlashRenderCommand.name);
   } else {
-    Serial.printf("scene=%u/%u name=%s command=%s\n",
+    Serial.printf("SCENE: %u/%u name=%s command=%s\n",
                   static_cast<unsigned>(currentProgram + 1),
                   static_cast<unsigned>(currentProgramCount),
                   sceneName(currentProgram),
                   activeRgbCommand.name);
   }
-  Serial.printf("control=%s bpm=%u muted=%u\n",
+  Serial.printf("CONTROL: mode=%s bpm=%u muted=%u\n",
                 runModeName(runMode),
                 static_cast<unsigned>(currentBpmValue()),
                 static_cast<unsigned>(outputMuted));
@@ -701,10 +701,10 @@ void printStatus() {
 void announceNodeProfile() {
   Serial.println();
   Serial.println("-----");
-  Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
-  Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
-  Serial.printf("renderer=%s\n", renderer.rendererName());
-  Serial.printf("runtime=%s\n", runtimeLabelFor(nodeIdentity.nodeKind));
+  Serial.printf("NODE: mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
+  Serial.printf("NODE: role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
+  Serial.printf("RENDERER: %s\n", renderer.rendererName());
+  Serial.printf("RUNTIME: %s\n", runtimeLabelFor(nodeIdentity.nodeKind));
   Serial.println("-----");
 }
 
@@ -727,7 +727,7 @@ void switchNodeKind(NodeKind nodeKind, bool persist) {
 
   if (persist) {
     if (!saveNodeKind(nodeKind) || !saveNodeRole(effectiveRole)) {
-      Serial.println("config=save_failed");
+      Serial.println("CONFIG: save_failed");
     }
   }
 
@@ -757,14 +757,14 @@ void switchNodeKind(NodeKind nodeKind, bool persist) {
 
 void switchNodeRole(NodeRole nodeRole, bool persist) {
   if (!roleCompatible(nodeIdentity.nodeKind, nodeRole)) {
-    Serial.printf("serial=role_mismatch role=%s mode=%s\n",
+    Serial.printf("SERIAL: role_mismatch role=%s mode=%s\n",
                   nodeRoleName(nodeRole),
                   nodeKindName(nodeIdentity.nodeKind));
     return;
   }
 
   if (persist && !saveNodeRole(nodeRole)) {
-    Serial.println("config=save_failed");
+    Serial.println("CONFIG: save_failed");
   }
 
   const bool brainOwned = isBrainOwned(runMode);
@@ -895,7 +895,7 @@ void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
   }
   lastRemoteCommandRevision = 0;
   enterBrainWaitingMode();
-  Serial.println("brain=waiting_for_clock");
+  Serial.println("BRAIN: waiting_for_clock");
   sendNodeStatus("brain_hello");
 }
 
@@ -915,7 +915,7 @@ void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
   lastRemoteCommandRevision = message.commandRevision;
   enterBrainWaitingMode();
 
-  Serial.printf("brain=flash command=%s role=%s bpm=%u\n",
+  Serial.printf("BRAIN: flash command=%s role=%s bpm=%u\n",
                 activeFlashCommand.name,
                 nodeRoleName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
@@ -938,7 +938,7 @@ void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
   lastRemoteCommandRevision = message.commandRevision;
   enterBrainWaitingMode();
 
-  Serial.printf("brain=rgb command=%s role=%s bpm=%u\n",
+  Serial.printf("BRAIN: rgb command=%s role=%s bpm=%u\n",
                 activeRgbCommand.name,
                 nodeRoleName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
@@ -1088,7 +1088,7 @@ void serviceButton() {
   if (isPressed && buttonPressed && !longPressHandled) {
     if ((now - buttonPressedAtMs) >= BUTTON_LONG_PRESS_MS) {
       longPressHandled = true;
-      Serial.println("button=long_press");
+      Serial.println("BUTTON: long_press");
       if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
         outputMuted = true;
         resetFlashBurst();
@@ -1104,7 +1104,7 @@ void serviceButton() {
     buttonPressed = false;
 
     if (!longPressHandled && runMode == RunMode::Demo) {
-      Serial.println("button=short_press");
+      Serial.println("BUTTON: short_press");
       selectNextProgram();
     }
   }
@@ -1331,8 +1331,8 @@ void processSerialCommand(const char* line) {
     return;
   }
 
-  Serial.printf("serial=unknown_command '%s'\n", line);
-  Serial.println("serial=use 'help'");
+  Serial.printf("SERIAL: unknown_command '%s'\n", line);
+  Serial.println("SERIAL: use 'help'");
 }
 
 void serviceSerial() {
@@ -1374,20 +1374,20 @@ void setup() {
   Serial.println();
   Serial.println("Decaflash Node V2");
   Serial.printf(
-    "device_type=%u node_kind=%u node_role=%u\n",
+    "DEVICE: type=%u node_kind=%u node_role=%u\n",
     static_cast<unsigned>(nodeIdentity.deviceType),
     static_cast<unsigned>(nodeIdentity.nodeKind),
     static_cast<unsigned>(nodeIdentity.nodeEffect)
   );
-  Serial.printf("node_mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
-  Serial.printf("node_role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
-  Serial.printf("runtime=%s\n", runtimeLabelFor(nodeIdentity.nodeKind));
-  Serial.println("controls=atom button + serial");
-  Serial.printf("renderer=%s\n", renderer.rendererName());
+  Serial.printf("NODE: mode=%s\n", nodeKindName(nodeIdentity.nodeKind));
+  Serial.printf("NODE: role=%s\n", nodeRoleName(nodeIdentity.nodeEffect));
+  Serial.printf("RUNTIME: %s\n", runtimeLabelFor(nodeIdentity.nodeKind));
+  Serial.println("CONTROLS: atom button + serial");
+  Serial.printf("RENDERER: %s\n", renderer.rendererName());
   if (nodeIdentity.nodeKind == NodeKind::RgbStrip) {
-    Serial.println("rgb_driver=sk6812 pins=26+32");
+    Serial.println("RGB-DRIVER: sk6812 pins=26+32");
   }
-  Serial.printf("clock=%u bpm %u/4\n", BPM, beatsPerBar);
+  Serial.printf("CLOCK: %u bpm %u/4\n", BPM, beatsPerBar);
 
   const auto initResult = initEspNow();
   decaflash::espnow_transport::PeerResult peerResult = {};
@@ -1396,18 +1396,18 @@ void setup() {
   }
   espNowReady = initResult.ok() && peerResult.ok();
 
-  Serial.printf("wifi_set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
-  Serial.printf("wifi_start=%d\n", static_cast<int>(initResult.wifiStart));
-  Serial.printf("wifi_set_channel=%d\n", static_cast<int>(initResult.wifiSetChannel));
-  Serial.printf("esp_now_init=%d\n", static_cast<int>(initResult.espNowInit));
-  Serial.printf("esp_now=%s\n", espNowReady ? "ok" : "failed");
-  Serial.printf("peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
-  Serial.printf("add_peer=%d\n", static_cast<int>(peerResult.addPeer));
+  Serial.printf("WIFI: set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
+  Serial.printf("WIFI: start=%d\n", static_cast<int>(initResult.wifiStart));
+  Serial.printf("WIFI: set_channel=%d\n", static_cast<int>(initResult.wifiSetChannel));
+  Serial.printf("ESP-NOW: init=%d\n", static_cast<int>(initResult.espNowInit));
+  Serial.printf("ESP-NOW: state=%s\n", espNowReady ? "ok" : "failed");
+  Serial.printf("ESP-NOW: peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
+  Serial.printf("ESP-NOW: add_peer=%d\n", static_cast<int>(peerResult.addPeer));
   if (espNowReady) {
     esp_now_register_recv_cb(onEspNowReceive);
   }
-  Serial.println("runtime=demo scene playback + brain assignment receive");
-  Serial.println("node_stack=kind+role aware");
+  Serial.println("RUNTIME: demo scene playback + brain assignment receive");
+  Serial.println("NODE-STACK: kind+role aware");
   printPrograms();
   printHelp();
   selectProgram(0);

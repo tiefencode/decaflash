@@ -13,6 +13,8 @@ V1 is intentionally small:
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
 - microphone and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
+- the core V1 feature is still local BPM/beat handling plus reliable node control over ESP-NOW
+- AI/Wi-Fi is currently an enhancement path only; with AI active, the core ESP-NOW node feature is not yet reliable enough in all channel situations
 
 ## Project Structure
 

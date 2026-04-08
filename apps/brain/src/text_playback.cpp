@@ -99,7 +99,7 @@ void stopTextPlayback(bool announce = true) {
   clearTextPlayback();
 
   if (announce) {
-    Serial.println("text=clear");
+    Serial.println("TEXT: clear");
   }
 }
 
@@ -133,7 +133,7 @@ void startTextPlayback(const char* rawText, uint32_t delayMs) {
     return;
   }
 
-  Serial.printf("text=start len=%u cols=%u\n",
+  Serial.printf("TEXT: start len=%u cols=%u\n",
                 static_cast<unsigned>(textPlaybackLength),
                 static_cast<unsigned>(textPlaybackColumns));
 }
@@ -154,7 +154,7 @@ void stop(bool announce) {
 }
 
 void printHelp() {
-  Serial.println("text=api start(text) stop()");
+  Serial.println("TEXT: api start(text) stop()");
 }
 
 bool serviceMatrix(uint32_t now) {
@@ -168,7 +168,7 @@ bool serviceMatrix(uint32_t now) {
 
   if (textPlaybackColumn >= static_cast<int16_t>(textPlaybackColumns)) {
     clearTextPlayback();
-    Serial.println("text=done");
+    Serial.println("TEXT: done");
     return true;
   }
 

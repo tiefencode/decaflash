@@ -42,6 +42,24 @@ struct PeerResult {
   }
 };
 
+struct RecoveryResult {
+  esp_err_t wifiStart = ESP_FAIL;
+  esp_err_t wifiSetChannel = ESP_FAIL;
+  esp_err_t espNowDeinit = ESP_FAIL;
+  esp_err_t espNowInit = ESP_FAIL;
+  PeerResult peer = {};
+
+  bool ok() const {
+    const bool wifiStartOk = wifiStart == ESP_OK || wifiStart == ESP_ERR_WIFI_CONN;
+    const bool deinitOk = espNowDeinit == ESP_OK || espNowDeinit == ESP_ERR_ESPNOW_NOT_INIT;
+    return wifiStartOk &&
+           wifiSetChannel == ESP_OK &&
+           deinitOk &&
+           espNowInit == ESP_OK &&
+           peer.ok();
+  }
+};
+
 inline InitResult initEspNow() {
   InitResult result;
 
@@ -87,7 +105,7 @@ inline PeerResult ensureBroadcastPeer() {
   PeerResult result;
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, kBroadcastMac, sizeof(kBroadcastMac));
-  peerInfo.channel = kWifiChannel;
+  peerInfo.channel = 0;
   peerInfo.encrypt = false;
 
   if (esp_now_is_peer_exist(kBroadcastMac)) {
@@ -97,6 +115,38 @@ inline PeerResult ensureBroadcastPeer() {
   }
 
   result.addPeer = esp_now_add_peer(&peerInfo);
+  return result;
+}
+
+inline bool stationAssociated() {
+  wifi_ap_record_t accessPointInfo = {};
+  return esp_wifi_sta_get_ap_info(&accessPointInfo) == ESP_OK;
+}
+
+inline RecoveryResult recoverEspNow() {
+  RecoveryResult result;
+
+  result.wifiStart = esp_wifi_start();
+  if (result.wifiStart != ESP_OK && result.wifiStart != ESP_ERR_WIFI_CONN) {
+    return result;
+  }
+
+  if (stationAssociated()) {
+    result.wifiSetChannel = ESP_OK;
+  } else {
+    result.wifiSetChannel = esp_wifi_set_channel(kWifiChannel, WIFI_SECOND_CHAN_NONE);
+    if (result.wifiSetChannel != ESP_OK) {
+      return result;
+    }
+  }
+
+  result.espNowDeinit = esp_now_deinit();
+  result.espNowInit = esp_now_init();
+  if (result.espNowInit != ESP_OK) {
+    return result;
+  }
+
+  result.peer = ensureBroadcastPeer();
   return result;
 }
 

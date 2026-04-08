@@ -235,7 +235,7 @@ bool ensureWifiConnected() {
     return true;
   }
 
-  Serial.println("api=abort reason=wifi_not_connected");
+  Serial.println("API: abort reason=wifi_not_connected");
   return false;
 }
 
@@ -301,7 +301,7 @@ void printResponseBodySnippet(const char* label, const char* body) {
   }
   snippet[length] = '\0';
 
-  Serial.printf("api=%s_body body=\"%s\"\n", label, snippet);
+  Serial.printf("API: %s_body body=\"%s\"\n", label, snippet);
 }
 
 bool extractJsonStringField(const char* body,
@@ -523,7 +523,7 @@ bool beginSecureRequest(HTTPClient& http,
   client.setInsecure();
   client.setTimeout(kCloudRequestTimeoutMs);
   if (!http.begin(client, url)) {
-    Serial.printf("api=begin_failed endpoint=%s\n", label);
+    Serial.printf("API: begin_failed endpoint=%s\n", label);
     return false;
   }
 
@@ -554,7 +554,7 @@ bool deriveCloudAuddUrl(char* destination, size_t capacity) {
   const char* chattieUrl = decaflash::secrets::kCloudChattieUrl;
   const char* suffix = strstr(chattieUrl, "/api/chattie");
   if (suffix == nullptr || strcmp(suffix, "/api/chattie") != 0) {
-    Serial.println("api=cloud_config_invalid expected=kCloudChattieUrl_ends_with_/api/chattie");
+    Serial.println("API: cloud_config_invalid expected=kCloudChattieUrl_ends_with_/api/chattie");
     return false;
   }
 
@@ -622,7 +622,7 @@ bool postCloudJson(HTTPClient& http,
 
   const int statusCode = http.POST(payload);
   if (statusCode <= 0) {
-    Serial.printf("api=request_failed endpoint=%s err=%s\n",
+    Serial.printf("API: request_failed endpoint=%s err=%s\n",
                   label,
                   http.errorToString(statusCode).c_str());
     http.end();
@@ -634,7 +634,7 @@ bool postCloudJson(HTTPClient& http,
 
   if (statusCode != HTTP_CODE_OK || responseLength == 0) {
     printResponseBodySnippet(label, responseBody);
-    Serial.printf("api=%s_failed status=%d bytes=%u\n",
+    Serial.printf("API: %s_failed status=%d bytes=%u\n",
                   label,
                   statusCode,
                   static_cast<unsigned>(responseLength));
@@ -662,7 +662,7 @@ bool postCloudStream(HTTPClient& http,
 
   const int statusCode = http.sendRequest("POST", &stream, contentLength);
   if (statusCode <= 0) {
-    Serial.printf("api=request_failed endpoint=%s err=%s\n",
+    Serial.printf("API: request_failed endpoint=%s err=%s\n",
                   label,
                   http.errorToString(statusCode).c_str());
     http.end();
@@ -674,7 +674,7 @@ bool postCloudStream(HTTPClient& http,
 
   if (statusCode != HTTP_CODE_OK || responseLength == 0) {
     printResponseBodySnippet(label, responseBody);
-    Serial.printf("api=%s_failed status=%d bytes=%u\n",
+    Serial.printf("API: %s_failed status=%d bytes=%u\n",
                   label,
                   statusCode,
                   static_cast<unsigned>(responseLength));
@@ -713,7 +713,7 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
 
   char auddUrl[160] = {};
   if (!deriveCloudAuddUrl(auddUrl, sizeof(auddUrl))) {
-    Serial.println("api=audd_url_invalid");
+    Serial.println("API: audd_url_invalid");
     return false;
   }
 
@@ -750,7 +750,7 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
     kCloudMultipartBoundary
   );
   if (preambleLength <= 0 || static_cast<size_t>(preambleLength) >= sizeof(preamble)) {
-    Serial.printf("api=audd_preamble_invalid len=%d cap=%u\n",
+    Serial.printf("API: audd_preamble_invalid len=%d cap=%u\n",
                   preambleLength,
                   static_cast<unsigned>(sizeof(preamble)));
     return false;
@@ -764,7 +764,7 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
     kCloudMultipartBoundary
   );
   if (footerLength <= 0 || static_cast<size_t>(footerLength) >= sizeof(footer)) {
-    Serial.printf("api=audd_footer_invalid len=%d cap=%u\n",
+    Serial.printf("API: audd_footer_invalid len=%d cap=%u\n",
                   footerLength,
                   static_cast<unsigned>(sizeof(footer)));
     return false;
@@ -801,22 +801,22 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
 
   bool matched = false;
   if (!extractJsonBoolField(body, "matched", matched)) {
-    Serial.println("api=audd_parse_failed expected=matched_bool");
+    Serial.println("API: audd_parse_failed expected=matched_bool");
     return false;
   }
 
   if (!matched) {
-    Serial.println("api=audd_no_match");
+    Serial.println("API: audd_no_match");
     return false;
   }
 
   if (!extractJsonStringField(body, "title", title, titleCapacity) ||
       !extractJsonStringField(body, "artist", artist, artistCapacity)) {
-    Serial.println("api=audd_parse_failed expected=title_and_artist");
+    Serial.println("API: audd_parse_failed expected=title_and_artist");
     return false;
   }
 
-  Serial.printf("api=audd_match artist=\"%s\" title=\"%s\"\n", artist, title);
+  Serial.printf("API: audd_match artist=\"%s\" title=\"%s\"\n", artist, title);
   return true;
 }
 
@@ -837,7 +837,7 @@ bool fetchCloudChattieText(const char* input,
       !appendText(payload, sizeof(payload), payloadLength, "\",\"input\":\"") ||
       !appendJsonEscaped(payload, sizeof(payload), payloadLength, input) ||
       !appendText(payload, sizeof(payload), payloadLength, "\"}")) {
-    Serial.println("api=chattie_payload_too_large");
+    Serial.println("API: chattie_payload_too_large");
     return false;
   }
 
@@ -855,11 +855,11 @@ bool fetchCloudChattieText(const char* input,
   }
 
   if (!extractJsonStringField(body, "text", destination, capacity)) {
-    Serial.println("api=chattie_parse_failed expected=text");
+    Serial.println("API: chattie_parse_failed expected=text");
     return false;
   }
 
-  Serial.printf("api=chattie_text text=\"%s\"\n", destination);
+  Serial.printf("API: chattie_text text=\"%s\"\n", destination);
   return true;
 }
 
@@ -959,7 +959,7 @@ bool ensureCloudWorkerReady() {
     0);
 
   if (created != pdPASS || cloudWorkerTaskHandle == nullptr) {
-    Serial.println("api=worker_create_failed");
+    Serial.println("API: worker_create_failed");
     cloudWorkerTaskHandle = nullptr;
     return false;
   }
@@ -1062,13 +1062,13 @@ void cancelAiWork() {
 
 bool queueCloudChattieInputToTextDisplay(const char* input) {
   if (!cloudConfigured()) {
-    Serial.println("api=cloud_missing_config file=include/cloud_config.h");
-    Serial.println("api=cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
+    Serial.println("API: cloud_missing_config file=include/cloud_config.h");
+    Serial.println("API: cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
     return false;
   }
 
   if (input == nullptr || input[0] == '\0') {
-    Serial.println("api=chattie_missing_input");
+    Serial.println("API: chattie_missing_input");
     return false;
   }
 
@@ -1080,7 +1080,7 @@ bool queueCloudChattieInputToTextDisplay(const char* input) {
   job.type = CloudJobType::Prompt;
   job.owner = CloudJobOwner::Manual;
   if (!copyInputText(input, job.input, sizeof(job.input))) {
-    Serial.println("api=chattie_input_invalid");
+    Serial.println("API: chattie_input_invalid");
     return false;
   }
 
@@ -1089,15 +1089,15 @@ bool queueCloudChattieInputToTextDisplay(const char* input) {
 
 bool queueRecordedAudioToTextDisplay(RecordedAudioClip& recording, bool aiOwned) {
   if (!cloudConfigured()) {
-    Serial.println("api=cloud_missing_config file=include/cloud_config.h");
-    Serial.println("api=cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
+    Serial.println("API: cloud_missing_config file=include/cloud_config.h");
+    Serial.println("API: cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
     releaseRecordedAudioClip(recording);
     return false;
   }
 
   if (recording.data == nullptr || recording.byteCount == 0 ||
       recording.sampleCount == 0 || recording.sampleRateHz == 0) {
-    Serial.println("record=empty");
+    Serial.println("RECORD: empty");
     releaseRecordedAudioClip(recording);
     return false;
   }
