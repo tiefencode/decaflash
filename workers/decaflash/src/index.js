@@ -17,6 +17,8 @@ const IMA_BLOCK_SAMPLE_COUNT = 256;
 const DEBUG_WAV_CACHE_URL = "https://decaflash-debug.internal/api/debug/last.wav";
 const DEBUG_JSON_CACHE_URL = "https://decaflash-debug.internal/api/debug/last.json";
 const DEBUG_CACHE_SECONDS = 3600;
+const DEBUG_WAV_KV_KEY = "debug:last:wav";
+const DEBUG_JSON_KV_KEY = "debug:last:json";
 
 export default {
   async fetch(request, env) {
@@ -37,11 +39,20 @@ export default {
 
     try {
       if (url.pathname === "/api/debug/last.wav") {
-        return await getDebugAsset(DEBUG_WAV_CACHE_URL);
+        return await getDebugAsset(env, {
+          cacheUrl: DEBUG_WAV_CACHE_URL,
+          kvKey: DEBUG_WAV_KV_KEY,
+          contentType: "audio/wav",
+          contentDisposition: 'attachment; filename="decaflash-last.wav"',
+        });
       }
 
       if (url.pathname === "/api/debug/last.json") {
-        return await getDebugAsset(DEBUG_JSON_CACHE_URL);
+        return await getDebugAsset(env, {
+          cacheUrl: DEBUG_JSON_CACHE_URL,
+          kvKey: DEBUG_JSON_KV_KEY,
+          contentType: "application/json; charset=utf-8",
+        });
       }
 
       if (url.pathname === "/api/chattie") {
@@ -194,7 +205,7 @@ async function handleAudd(request, env) {
 
   if (!response.ok) {
     console.log(`audd=upstream_http_error status=${response.status}`);
-    await storeDebugArtifacts(requestInfo, debugWavBytes, {
+    await storeDebugArtifacts(env, requestInfo, debugWavBytes, {
       upstream_http_status: response.status,
       matched: false,
     });
@@ -211,7 +222,7 @@ async function handleAudd(request, env) {
     artist: typeof result?.artist === "string" ? result.artist : "",
   };
   console.log(`audd=upstream_response ${JSON.stringify(upstreamInfo)}`);
-  await storeDebugArtifacts(requestInfo, debugWavBytes, upstreamInfo);
+  await storeDebugArtifacts(env, requestInfo, debugWavBytes, upstreamInfo);
 
   if (!result) {
     return jsonResponse({ matched: false });
@@ -235,8 +246,26 @@ function integerField(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
-async function getDebugAsset(cacheUrl) {
-  const cacheKey = new Request(cacheUrl, { method: "GET" });
+async function getDebugAsset(env, options) {
+  const debugStore = getDebugStore(env);
+  if (debugStore) {
+    const stored = await debugStore.get(options.kvKey, "arrayBuffer");
+    if (!stored) {
+      return jsonResponse({ error: "debug_asset_not_found" }, 404);
+    }
+
+    const headers = {
+      "content-type": options.contentType,
+      "cache-control": "no-store",
+    };
+    if (options.contentDisposition) {
+      headers["content-disposition"] = options.contentDisposition;
+    }
+
+    return new Response(stored, { headers });
+  }
+
+  const cacheKey = new Request(options.cacheUrl, { method: "GET" });
   const response = await caches.default.match(cacheKey);
   if (!response) {
     return jsonResponse({ error: "debug_asset_not_found" }, 404);
@@ -244,7 +273,7 @@ async function getDebugAsset(cacheUrl) {
   return response;
 }
 
-async function storeDebugArtifacts(requestInfo, wavBytes, upstreamInfo) {
+async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
   if (!(wavBytes instanceof Uint8Array) || wavBytes.byteLength === 0) {
     return;
   }
@@ -272,14 +301,33 @@ async function storeDebugArtifacts(requestInfo, wavBytes, upstreamInfo) {
 
   const wavCacheKey = new Request(DEBUG_WAV_CACHE_URL, { method: "GET" });
   const jsonCacheKey = new Request(DEBUG_JSON_CACHE_URL, { method: "GET" });
-  await Promise.all([
-    caches.default.put(wavCacheKey, wavResponse),
-    caches.default.put(jsonCacheKey, jsonResponseBody),
-  ]);
+  const debugStore = getDebugStore(env);
+
+  if (debugStore) {
+    await Promise.all([
+      debugStore.put(DEBUG_WAV_KV_KEY, wavBytes, {
+        expirationTtl: DEBUG_CACHE_SECONDS,
+      }),
+      debugStore.put(DEBUG_JSON_KV_KEY, JSON.stringify(metadata, null, 2), {
+        expirationTtl: DEBUG_CACHE_SECONDS,
+      }),
+    ]);
+  } else {
+    await Promise.all([
+      caches.default.put(wavCacheKey, wavResponse),
+      caches.default.put(jsonCacheKey, jsonResponseBody),
+    ]);
+  }
 
   console.log(
     `debug=stored wav_bytes=${wavBytes.byteLength} sample_count=${metadata.sample_count ?? 0}`,
   );
+}
+
+function getDebugStore(env) {
+  return env?.DEBUG_ARTIFACTS && typeof env.DEBUG_ARTIFACTS.get === "function"
+    ? env.DEBUG_ARTIFACTS
+    : null;
 }
 
 function clamp(value, min, max) {
