@@ -7,6 +7,8 @@ Current routes:
 - `POST /api/chattie`
 - `POST /api/audd`
 - `GET /api/health`
+- `GET /api/debug/last.wav`
+- `GET /api/debug/last.json`
 
 ## Local Development
 
@@ -38,6 +40,41 @@ Recommended pragmatic path:
 6. Verify secrets under `Settings -> Variables and Secrets`.
 
 If Cloudflare creates a new Worker project or environment, set these secrets again there.
+
+## Debug Artifacts
+
+`/api/audd` stores the most recent decoded WAV plus metadata for debugging.
+
+Required Cloudflare setup:
+
+- create a KV namespace, e.g. `decaflash-debug-artifacts`
+- bind it as `DEBUG_ARTIFACTS`
+- keep the binding in `wrangler.jsonc` via `kv_namespaces`
+
+After a fresh `/api/audd` run, download the latest debug audio:
+
+```bash
+curl -fL \
+  -H 'Authorization: Bearer db3953d42370ed9d7c329704988ecaa6a84a693ea84d76e8f3627d05d9f353f5' \
+  'https://decaflash.tiefencode.workers.dev/api/debug/last.wav' \
+  -o "$HOME/Downloads/decaflash-last.wav"
+```
+
+Download the matching metadata:
+
+```bash
+curl -fL \
+  -H 'Authorization: Bearer db3953d42370ed9d7c329704988ecaa6a84a693ea84d76e8f3627d05d9f353f5' \
+  'https://decaflash.tiefencode.workers.dev/api/debug/last.json' \
+  -o "$HOME/Downloads/decaflash-last.json"
+```
+
+Quick sanity check on macOS:
+
+```bash
+file "$HOME/Downloads/decaflash-last.wav"
+afplay "$HOME/Downloads/decaflash-last.wav"
+```
 
 ## Brain Contract
 
