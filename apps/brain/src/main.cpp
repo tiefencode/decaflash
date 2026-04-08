@@ -38,8 +38,6 @@ static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
 static constexpr uint32_t METER_REFRESH_MS = 40;
-static constexpr uint32_t BPM_FOLLOW_LOG_INTERVAL_MS = 15000;
-static constexpr uint8_t BPM_FOLLOW_LOG_DELTA = 4;
 static constexpr uint32_t UI_SCENE_DISPLAY_MS = 3000;
 static constexpr uint16_t MIN_BPM = 60;
 static constexpr uint16_t MAX_BPM = 180;
@@ -100,8 +98,6 @@ uint8_t audioSyncPhaseMissCount = 0;
 uint32_t lastAudioOnsetSeenAtMs = 0;
 uint32_t lastAudioOnsetHandledAtMs = 0;
 uint32_t lastAudioLockAtMs = 0;
-uint32_t lastBpmFollowLogAtMs = 0;
-uint16_t lastLoggedFollowBpm = DEFAULT_BPM;
 decaflash::brain::PdmMicrophone microphone;
 portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
 bool buttonPressedLastLoop = false;
@@ -352,16 +348,7 @@ void setClockBpm(uint16_t bpm, const char* source) {
   currentBpm = clampedBpm;
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   clockRevision++;
-
-  const uint32_t now = millis();
-  const bool isFollow = strcmp(source, "audio_follow") == 0;
-  if (!isFollow ||
-      bpmDifference(currentBpm, lastLoggedFollowBpm) >= BPM_FOLLOW_LOG_DELTA ||
-      (now - lastBpmFollowLogAtMs) >= BPM_FOLLOW_LOG_INTERVAL_MS) {
-    Serial.printf("bpm=%u source=%s\n", static_cast<unsigned>(currentBpm), source);
-    lastLoggedFollowBpm = currentBpm;
-    lastBpmFollowLogAtMs = now;
-  }
+  (void)source;
 }
 
 void updateClockFromAudio(uint32_t now) {
@@ -528,9 +515,6 @@ void updateClockFromAudio(uint32_t now) {
       audioSyncPhaseMissSign = 0;
       audioSyncPhaseMissCount = 0;
       queueSyncBeatDot();
-      Serial.printf("audio_sync=resync error=%ld at=%lu\n",
-                    static_cast<long>(phaseErrorMs),
-                    static_cast<unsigned long>(onsetAtMs));
       return;
     }
 

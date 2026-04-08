@@ -138,8 +138,6 @@ void toggle(uint32_t now, PdmMicrophone& microphone) {
 
     if (decaflash::brain::wifi_manager::isConnected()) {
       aiReadyToListenAtMs = now + kToggleDisplayMs;
-      Serial.printf("ai=ready wait_ms=%lu\n",
-                    static_cast<unsigned long>(kToggleDisplayMs));
     } else {
       aiNextWifiRetryAtMs = now + kToggleDisplayMs;
     }
@@ -179,16 +177,12 @@ void service(uint32_t now, const PdmMicrophone& microphone) {
       return;
     }
 
-    Serial.println("ai=wifi_connect");
-
     const bool connected = decaflash::brain::wifi_manager::connect();
     const uint32_t finishedAtMs = millis();
     if (connected) {
       showTransientIcon(TransientIcon::WifiConnected, 0x00FF00, kWifiConnectedDisplayMs);
       aiReadyToListenAtMs = finishedAtMs + kWifiConnectedDisplayMs;
       aiNextWifiRetryAtMs = 0;
-      Serial.printf("ai=wifi_connected wait_ms=%lu\n",
-                    static_cast<unsigned long>(kWifiConnectedDisplayMs));
     } else {
       disableForWifiFailure(finishedAtMs, "wifi_connect_failed");
     }

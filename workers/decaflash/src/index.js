@@ -192,8 +192,6 @@ async function handleAudd(request, env) {
     requestInfo.pcm_avg_abs = pcmSummary.avgAbs;
   }
 
-  console.log(`audd=request ${JSON.stringify(requestInfo)}`);
-
   const auddForm = new FormData();
   auddForm.set("api_token", env.AUDD_API_TOKEN);
   auddForm.set("file", uploadFile);
@@ -204,7 +202,7 @@ async function handleAudd(request, env) {
   });
 
   if (!response.ok) {
-    console.log(`audd=upstream_http_error status=${response.status}`);
+    console.error(`audd=upstream_http_error status=${response.status}`);
     await storeDebugArtifacts(env, requestInfo, debugWavBytes, {
       upstream_http_status: response.status,
       matched: false,
@@ -221,7 +219,6 @@ async function handleAudd(request, env) {
     title: typeof result?.title === "string" ? result.title : "",
     artist: typeof result?.artist === "string" ? result.artist : "",
   };
-  console.log(`audd=upstream_response ${JSON.stringify(upstreamInfo)}`);
   await storeDebugArtifacts(env, requestInfo, debugWavBytes, upstreamInfo);
 
   if (!result) {
@@ -319,9 +316,6 @@ async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
     ]);
   }
 
-  console.log(
-    `debug=stored wav_bytes=${wavBytes.byteLength} sample_count=${metadata.sample_count ?? 0}`,
-  );
 }
 
 function getDebugStore(env) {

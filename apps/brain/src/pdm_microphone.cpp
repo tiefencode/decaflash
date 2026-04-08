@@ -210,11 +210,6 @@ bool PdmMicrophone::begin() {
                 static_cast<unsigned long>(kSampleRateHz),
                 8u,
                 128u);
-  if (kVerboseMicLevelReports) {
-    Serial.println("mic=report fields=env block mfast mslow disp avg peak dc raw_p2p floor ceil meter afast aslow afloor music onset bpm conf samples");
-  } else {
-    Serial.println("mic=report compact");
-  }
   return true;
 }
 
@@ -322,7 +317,6 @@ bool PdmMicrophone::requestRecording(uint32_t durationMs) {
 
   if (recordingBuffer_ == nullptr || targetSampleCount < minimumSampleCount) {
     Serial.printf("record=abort reason=no_memory bytes=%u\n",
-                  static_cast<unsigned>(ima_adpcm::requiredBytesForSamples(requestedSampleCount)));
                   static_cast<unsigned>(requestedSampleCount));
     return false;
   }

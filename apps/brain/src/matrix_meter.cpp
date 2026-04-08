@@ -29,9 +29,9 @@ static constexpr RgbColor kMeterGradient[] = {
 
 static constexpr RgbColor kAiMeterGradient[] = {
   {  0,   0,   0},
-  {  0,  96,  16},
-  {  0, 180,  72},
-  {120, 255, 160},
+  {  0, 220,  24},
+  { 72, 255, 120},
+  {180, 255, 190},
 };
 uint8_t meterPixelOrder[kMeterDrawablePixelCount] = {};
 uint8_t meterPixelLevels[kMatrixPixelCount] = {};

@@ -61,26 +61,6 @@ const char* statusName(wl_status_t status) {
   }
 }
 
-void printConnectionHint(wl_status_t status) {
-  switch (status) {
-    case WL_NO_SSID_AVAIL:
-      Serial.println("wifi=hint check=ssid_name_hotspot_visibility_2.4ghz_band");
-      Serial.println("wifi=hint iphone_hotspot try=enable_maximize_compatibility");
-      break;
-
-    case WL_CONNECT_FAILED:
-      Serial.println("wifi=hint check=password_or_auth_method");
-      break;
-
-    case WL_DISCONNECTED:
-      Serial.println("wifi=hint check=signal_strength_or_ap_state");
-      break;
-
-    default:
-      break;
-  }
-}
-
 bool targetSsidVisible(bool verbose) {
   const int networkCount = WiFi.scanNetworks(false, true);
   if (verbose) {
@@ -145,7 +125,6 @@ bool connect() {
     return true;
   }
 
-  Serial.println("wifi=connect note=may_affect_espnow_channel");
   decaflash::brain::matrix::drawWifiConnectingIcon(millis(), wifiPulseColor(millis()));
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
@@ -171,7 +150,6 @@ bool connect() {
   Serial.printf("wifi=connect_failed status=%d name=%s\n",
                 static_cast<int>(status),
                 statusName(status));
-  printConnectionHint(status);
   return false;
 }
 
@@ -208,7 +186,6 @@ void printStatus() {
                 static_cast<int>(status),
                 statusName(status),
                 credentialsAvailable() ? "yes" : "no");
-  printConnectionHint(status);
 }
 
 }  // namespace decaflash::brain::wifi_manager
