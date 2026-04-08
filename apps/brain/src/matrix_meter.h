@@ -4,6 +4,11 @@
 
 namespace decaflash::brain::matrix {
 
-void drawMicrophoneMeter(uint8_t filledPixels);
+enum class MeterTheme : uint8_t {
+  Default = 0,
+  AiActive = 1,
+};
+
+void drawMicrophoneMeter(uint8_t filledPixels, MeterTheme theme = MeterTheme::Default);
 
 }  // namespace decaflash::brain::matrix

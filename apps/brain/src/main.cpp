@@ -8,6 +8,11 @@
 #include "matrix_ui.h"
 #include "pdm_microphone.h"
 #include "protocol.h"
+#include "brain_shell.h"
+#include "ai_mode.h"
+#include "api_client.h"
+#include "text_playback.h"
+#include "wifi_manager.h"
 
 using decaflash::DeviceType;
 using decaflash::NodeEffect;
@@ -99,6 +104,9 @@ uint32_t lastBpmFollowLogAtMs = 0;
 uint16_t lastLoggedFollowBpm = DEFAULT_BPM;
 decaflash::brain::PdmMicrophone microphone;
 portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
+bool buttonPressedLastLoop = false;
+bool buttonLongPressHandled = false;
+uint32_t buttonPressedAtMs = 0;
 
 struct TrackedNode {
   bool active = false;
@@ -541,7 +549,44 @@ bool isSceneUiActive(uint32_t now) {
   return uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) < 0;
 }
 
+void selectNextScene();
+void activateBrain();
+
+void handleButtonInput(uint32_t now) {
+  const bool buttonPressed = M5.Btn.isPressed();
+
+  if (buttonPressed && !buttonPressedLastLoop) {
+    buttonPressedAtMs = now;
+    buttonLongPressHandled = false;
+  }
+
+  if (buttonPressed && !buttonLongPressHandled &&
+      (now - buttonPressedAtMs) >= decaflash::brain::ai_mode::togglePressMs()) {
+    decaflash::brain::ai_mode::toggle(now, microphone);
+    buttonLongPressHandled = true;
+  }
+
+  if (!buttonPressed && buttonPressedLastLoop) {
+    if (!buttonLongPressHandled) {
+      if (brainLive) {
+        selectNextScene();
+      } else {
+        activateBrain();
+      }
+    }
+
+    buttonLongPressHandled = false;
+  }
+
+  buttonPressedLastLoop = buttonPressed;
+}
+
 void updateBeatDotOverlay(uint32_t now) {
+  if (decaflash::brain::text_playback::isActive() ||
+      decaflash::brain::ai_mode::blocksBeatDotOverlay(now, microphone)) {
+    return;
+  }
+
   if (brainLive && beatDotUntilMs != 0 && (int32_t)(now - beatDotUntilMs) < 0) {
     decaflash::brain::matrix::drawBeatDotOverlay(beatDotBeat, beatDotColorOverride);
     return;
@@ -552,7 +597,15 @@ void updateBeatDotOverlay(uint32_t now) {
 }
 
 void updateIdleMatrixUi(uint32_t now) {
+  if (decaflash::brain::text_playback::serviceMatrix(now)) {
+    return;
+  }
+
   if (isSceneUiActive(now) || matrixOffAtMs != 0) {
+    return;
+  }
+
+  if (decaflash::brain::ai_mode::renderOverlay(now, microphone)) {
     return;
   }
 
@@ -560,7 +613,10 @@ void updateIdleMatrixUi(uint32_t now) {
     return;
   }
 
-  decaflash::brain::matrix::drawMicrophoneMeter(microphone.meterLevel());
+  const auto meterTheme = decaflash::brain::ai_mode::useAiMeterTheme(microphone)
+    ? decaflash::brain::matrix::MeterTheme::AiActive
+    : decaflash::brain::matrix::MeterTheme::Default;
+  decaflash::brain::matrix::drawMicrophoneMeter(microphone.meterLevel(), meterTheme);
   lastMeterDrawAtMs = now;
 }
 
@@ -742,6 +798,7 @@ void setup() {
   Serial.printf("example_command=%s\n", message.command.name);
   Serial.printf("example_rgb=%s\n", kPulseReference.name);
   microphone.begin();
+  decaflash::brain::api_client::begin();
 
   const auto initResult = initEspNow();
   const auto peerResult = initResult.ok() ? ensureBroadcastPeer() : decltype(ensureBroadcastPeer()){};
@@ -757,6 +814,7 @@ void setup() {
   Serial.printf("startup=%s\n", espNowReady ? "silent start" : "startup only");
   Serial.println("button=press start/next scene");
   Serial.println("node_discovery=esp-now node status receive");
+  decaflash::brain::shell::printHelp();
 
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
@@ -771,7 +829,32 @@ void setup() {
 void loop() {
   M5.update();
   const uint32_t now = millis();
+  decaflash::brain::shell::serviceSerialInput();
   microphone.update();
+  decaflash::brain::api_client::service(now);
+  handleButtonInput(now);
+  if (microphone.recordingReady()) {
+    decaflash::brain::RecordedAudioClip recording = {};
+    const bool tookRecording = microphone.takeRecording(recording);
+    const bool queued = tookRecording &&
+      decaflash::brain::api_client::queueRecordedAudioToTextDisplay(
+        recording,
+        decaflash::brain::ai_mode::ownsRecording());
+    if (!queued) {
+      Serial.println("record=process_queue_failed");
+      if (!decaflash::brain::wifi_manager::isConnected() &&
+          decaflash::brain::ai_mode::ownsRecording()) {
+        decaflash::brain::ai_mode::handleWifiFailure(now);
+      } else {
+        decaflash::brain::ai_mode::handleRecordingProcessed(now, false);
+      }
+    }
+  }
+  bool audioProcessingSucceeded = false;
+  if (decaflash::brain::api_client::takeRecordedAudioCompletion(audioProcessingSucceeded)) {
+    decaflash::brain::ai_mode::handleRecordingProcessed(now, audioProcessingSucceeded);
+  }
+  decaflash::brain::ai_mode::service(now, microphone);
   processPendingNodeStatuses(now);
   expireTrackedNodes(now);
 
@@ -779,14 +862,6 @@ void loop() {
     sendCurrentCommands();
     nextSendAtMs = now + COMMAND_REFRESH_MS;
     pendingCommandRefresh = false;
-  }
-
-  if (M5.Btn.wasPressed()) {
-    if (brainLive) {
-      selectNextScene();
-    } else {
-      activateBrain();
-    }
   }
 
   if (uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) >= 0) {

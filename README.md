@@ -8,6 +8,8 @@ V1 is intentionally small:
 
 - `brain` can already broadcast demo commands and a separate beat clock over ESP-NOW
 - `brain` can now read the Unit Mini PDM on raw-signal level and print live stats over serial
+- `brain` can now display short serial-triggered text on the Matrix
+- `brain` can now use stored Wi-Fi credentials plus Cloud Worker endpoints for AudD and Chattie
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
 - microphone and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
@@ -18,6 +20,7 @@ V1 is intentionally small:
 - `apps/node/src` contains the shared node app plus the current flashlight renderer
 - `shared/include` contains types shared across apps
 - `docs` contains scope notes and project documentation
+- `workers/decaflash` contains the Cloudflare Worker for `/api/audd` and `/api/chattie`
 
 ## PlatformIO Environments
 
@@ -41,6 +44,14 @@ Build node firmware:
 
 ```bash
 pio run -e node
+```
+
+Run the Cloudflare Worker locally:
+
+```bash
+cd /Users/tiefencode/Projekte/decaflash/workers/decaflash
+npm install
+npm run dev
 ```
 
 ## Flash
@@ -101,11 +112,25 @@ pio device monitor -e node --port /dev/cu.usbserial-B956E80C38
 pio device monitor -e brain --port /dev/cu.usbserial-2D52E72138
 ```
 
+Current `brain` serial commands:
+
+- `text HALLO`
+- `text HALLO, WELT`
+- `text clear`
+- `chattie neon nacht`
+- `record`
+- `record 3000`
+- `wifi status`
+- `wifi scan`
+- `wifi connect`
+- `wifi disconnect`
+
 ## Brain Controls
 
 Current `brain` button behavior on the ATOM Matrix:
 
 - single short tap: start the brain if idle, otherwise switch immediately to the next scene
+- long press: toggle AI listening mode on or off
 
 ## Brain Microphone Input
 

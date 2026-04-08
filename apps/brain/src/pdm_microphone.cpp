@@ -3,6 +3,7 @@
 #include <driver/i2s.h>
 
 #include <cstdlib>
+#include <cstring>
 
 namespace decaflash::brain {
 
@@ -12,7 +13,13 @@ static constexpr i2s_port_t kMicPort = I2S_NUM_0;
 static constexpr gpio_num_t kMicDataPin = GPIO_NUM_26;
 static constexpr gpio_num_t kMicClockPin = GPIO_NUM_32;
 static constexpr uint32_t kSampleRateHz = 16000;
+static constexpr uint32_t kRecordingStoredSampleRateHz = 16000;
+static constexpr uint8_t kRecordingDecimationFactor = 1;
 static constexpr size_t kReadBufferSampleCount = 256;
+static constexpr uint32_t kDefaultRecordingDurationMs = 12000;
+static constexpr uint32_t kMinimumRecordingDurationMs = 1000;
+static constexpr uint32_t kMaximumRecordingDurationMs = 12000;
+static constexpr uint32_t kRecordingClampStepMs = 250;
 static constexpr uint32_t kReportIntervalMs = 1000;
 static constexpr uint32_t kFramePrintIntervalMs = 4000;
 static constexpr uint8_t kDcEstimateShift = 6;
@@ -77,6 +84,7 @@ static constexpr uint8_t kAnalysisPulseScaleShift = 2;
 static constexpr uint8_t kAnalysisPulseScoreWeight = 6;
 static constexpr bool kVerboseMicLevelReports = false;
 static constexpr bool kVerboseMicBeatReports = false;
+PdmMicrophone* gPrimaryMicrophone = nullptr;
 
 uint16_t bpmDifference(uint16_t left, uint16_t right) {
   return (left > right) ? (left - right) : (right - left);
@@ -145,6 +153,11 @@ bool inSameTempoFamily(uint16_t left, uint16_t right) {
 
 }  // namespace
 
+void releaseRecordedAudioClip(RecordedAudioClip& clip) {
+  free(clip.data);
+  clip = {};
+}
+
 bool PdmMicrophone::begin() {
   i2s_config_t config = {};
   config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM);
@@ -186,6 +199,7 @@ bool PdmMicrophone::begin() {
   }
 
   ready_ = true;
+  gPrimaryMicrophone = this;
   resetWindowStats();
   lastReportAtMs_ = millis();
   lastFramePrintAtMs_ = millis();
@@ -207,6 +221,11 @@ bool PdmMicrophone::begin() {
 void PdmMicrophone::update() {
   if (!ready_) {
     return;
+  }
+
+  const uint32_t startedAtMs = millis();
+  if (recordingRequested_ && !recordingActive_) {
+    beginRequestedRecording(startedAtMs);
   }
 
   int16_t sampleBuffer[kReadBufferSampleCount] = {0};
@@ -251,13 +270,180 @@ void PdmMicrophone::update() {
     updateAnalysis(now, blockLevel_, updatePeakAbs_);
     updateMeterLevel(blockLevel_);
   }
+  if (recordingActive_ && recordingSampleCount_ >= recordingTargetSampleCount_) {
+    finishRecording(now);
+  }
   if (readAnySamples && (now - lastReportAtMs_) >= kReportIntervalMs) {
     printReport(now);
   }
 }
 
+bool PdmMicrophone::requestRecording(uint32_t durationMs) {
+  if (!ready_) {
+    Serial.println("record=abort reason=mic_not_ready");
+    return false;
+  }
+
+  if (recordingActive_) {
+    Serial.printf("record=busy samples=%u\n",
+                  static_cast<unsigned>(recordingSampleCount_));
+    return false;
+  }
+
+  if (durationMs == 0) {
+    durationMs = kDefaultRecordingDurationMs;
+  }
+
+  if (durationMs < kMinimumRecordingDurationMs ||
+      durationMs > kMaximumRecordingDurationMs) {
+    Serial.printf("record=invalid_duration expected=%lu..%lu\n",
+                  static_cast<unsigned long>(kMinimumRecordingDurationMs),
+                  static_cast<unsigned long>(kMaximumRecordingDurationMs));
+    return false;
+  }
+
+  const size_t minimumSampleCount =
+    (static_cast<size_t>(kMinimumRecordingDurationMs) * kRecordingStoredSampleRateHz) / 1000U;
+  const size_t clampStepSampleCount =
+    (static_cast<size_t>(kRecordingClampStepMs) * kRecordingStoredSampleRateHz) / 1000U;
+  const size_t requestedSampleCount =
+    (static_cast<size_t>(durationMs) * kRecordingStoredSampleRateHz) / 1000U;
+
+  size_t targetSampleCount = requestedSampleCount;
+  while (targetSampleCount >= minimumSampleCount &&
+         !ensureRecordingBufferCapacity(targetSampleCount)) {
+    if (targetSampleCount <= clampStepSampleCount ||
+        targetSampleCount <= minimumSampleCount) {
+      break;
+    }
+
+    targetSampleCount -= clampStepSampleCount;
+  }
+
+  if (recordingBuffer_ == nullptr || targetSampleCount < minimumSampleCount) {
+    Serial.printf("record=abort reason=no_memory bytes=%u\n",
+                  static_cast<unsigned>(ima_adpcm::requiredBytesForSamples(requestedSampleCount)));
+    return false;
+  }
+
+  if (targetSampleCount != requestedSampleCount) {
+    durationMs = static_cast<uint32_t>(
+      (static_cast<uint64_t>(targetSampleCount) * 1000ULL) / kRecordingStoredSampleRateHz
+    );
+    Serial.printf("record=clamp duration_ms=%lu\n",
+                  static_cast<unsigned long>(durationMs));
+  }
+
+  requestedRecordingDurationMs_ = durationMs;
+  recordingTargetSampleCount_ = targetSampleCount;
+  recordingRequested_ = true;
+  recordingReady_ = false;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingEncodedByteCount_ = 0;
+  Serial.printf("record=request duration_ms=%lu\n",
+                static_cast<unsigned long>(durationMs));
+  return true;
+}
+
 bool PdmMicrophone::ready() const {
   return ready_;
+}
+
+bool PdmMicrophone::recordingActive() const {
+  return recordingActive_;
+}
+
+bool PdmMicrophone::recordingReady() const {
+  return recordingReady_;
+}
+
+uint32_t PdmMicrophone::recordingSampleRateHz() const {
+  return kRecordingStoredSampleRateHz;
+}
+
+size_t PdmMicrophone::recordedSampleCount() const {
+  return recordingSampleCount_;
+}
+
+size_t PdmMicrophone::recordedByteCount() const {
+  return recordingEncodedByteCount_;
+}
+
+bool PdmMicrophone::takeRecording(RecordedAudioClip& clip) {
+  clip = {};
+
+  if (!recordingReady_ || recordingBuffer_ == nullptr || recordingSampleCount_ == 0) {
+    return false;
+  }
+
+  clip.data = recordingBuffer_;
+  clip.byteCount = recordingEncodedByteCount_;
+  clip.sampleCount = recordingSampleCount_;
+  clip.sampleRateHz = kRecordingStoredSampleRateHz;
+
+  recordingBuffer_ = nullptr;
+  recordingBufferCapacity_ = 0;
+  recordingReady_ = false;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingEncodedByteCount_ = 0;
+  recordingTargetSampleCount_ = 0;
+  recordingInputSampleCount_ = 0;
+  requestedRecordingDurationMs_ = 0;
+  resetRecordingEncoding();
+  return true;
+}
+
+bool PdmMicrophone::cancelRecording() {
+  if (!recordingRequested_ && !recordingActive_ && !recordingReady_) {
+    return false;
+  }
+
+  const bool wasActive = recordingActive_;
+  recordingRequested_ = false;
+  recordingActive_ = false;
+  recordingReady_ = false;
+  recordingStartedAtMs_ = 0;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingEncodedByteCount_ = 0;
+  recordingTargetSampleCount_ = 0;
+  recordingInputSampleCount_ = 0;
+  requestedRecordingDurationMs_ = 0;
+  resetRecordingEncoding();
+
+  Serial.printf("record=cancel state=%s\n", wasActive ? "active" : "pending");
+  return true;
+}
+
+void PdmMicrophone::clearRecording() {
+  recordingReady_ = false;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingEncodedByteCount_ = 0;
+  resetRecordingEncoding();
+}
+
+bool PdmMicrophone::ensureRecordingBufferCapacity(size_t sampleCapacity) {
+  const size_t byteCapacity = ima_adpcm::requiredBytesForSamples(sampleCapacity);
+  if (byteCapacity == 0) {
+    return false;
+  }
+
+  if (byteCapacity <= recordingBufferCapacity_ && recordingBuffer_ != nullptr) {
+    return true;
+  }
+
+  free(recordingBuffer_);
+  recordingBuffer_ = static_cast<uint8_t*>(malloc(byteCapacity));
+  if (recordingBuffer_ == nullptr) {
+    recordingBufferCapacity_ = 0;
+    return false;
+  }
+
+  recordingBufferCapacity_ = byteCapacity;
+  return true;
 }
 
 uint8_t PdmMicrophone::meterLevel() const {
@@ -282,6 +468,92 @@ uint16_t PdmMicrophone::clockBpm() const {
 
 uint32_t PdmMicrophone::lastOnsetAtMs() const {
   return lastOnsetAtMs_;
+}
+
+void PdmMicrophone::resetRecordingEncoding() {
+  recordingAdpcmState_ = {};
+  recordingAdpcmPartialByte_ = 0;
+  recordingAdpcmHalfBytePending_ = false;
+  recordingAdpcmSeeded_ = false;
+}
+
+bool PdmMicrophone::appendRecordingSample(int16_t sample) {
+  if (recordingBuffer_ == nullptr || recordingSampleCount_ >= recordingTargetSampleCount_) {
+    return false;
+  }
+
+  if (!recordingAdpcmSeeded_) {
+    recordingAdpcmState_.predictor = sample;
+    recordingAdpcmState_.index = 0;
+    ima_adpcm::writeHeader(recordingBuffer_, recordingAdpcmState_);
+    recordingEncodedByteCount_ = ima_adpcm::kHeaderSize;
+    recordingAdpcmSeeded_ = true;
+    recordingSampleCount_ = 1;
+    return true;
+  }
+
+  const uint8_t code = ima_adpcm::encodeSample(sample, recordingAdpcmState_);
+  if (!recordingAdpcmHalfBytePending_) {
+    if (recordingEncodedByteCount_ >= recordingBufferCapacity_) {
+      return false;
+    }
+
+    recordingAdpcmPartialByte_ = static_cast<uint8_t>(code & 0x0F);
+    recordingAdpcmHalfBytePending_ = true;
+  } else {
+    recordingAdpcmPartialByte_ |= static_cast<uint8_t>((code & 0x0F) << 4);
+    if (recordingEncodedByteCount_ >= recordingBufferCapacity_) {
+      return false;
+    }
+    recordingBuffer_[recordingEncodedByteCount_++] = recordingAdpcmPartialByte_;
+    recordingAdpcmPartialByte_ = 0;
+    recordingAdpcmHalfBytePending_ = false;
+  }
+
+  recordingSampleCount_++;
+  return true;
+}
+
+void PdmMicrophone::beginRequestedRecording(uint32_t now) {
+  recordingRequested_ = false;
+  recordingActive_ = true;
+  recordingReady_ = false;
+  recordingStartedAtMs_ = now;
+  recordingFinishedAtMs_ = 0;
+  recordingSampleCount_ = 0;
+  recordingEncodedByteCount_ = 0;
+  recordingInputSampleCount_ = 0;
+  resetRecordingEncoding();
+
+  Serial.printf("record=start duration_ms=%lu target_samples=%u sample_rate=%lu\n",
+                static_cast<unsigned long>(requestedRecordingDurationMs_),
+                static_cast<unsigned>(recordingTargetSampleCount_),
+                static_cast<unsigned long>(kRecordingStoredSampleRateHz));
+}
+
+void PdmMicrophone::finishRecording(uint32_t now) {
+  if (recordingAdpcmHalfBytePending_) {
+    if (recordingEncodedByteCount_ < recordingBufferCapacity_) {
+      recordingBuffer_[recordingEncodedByteCount_++] = recordingAdpcmPartialByte_;
+    }
+    recordingAdpcmPartialByte_ = 0;
+    recordingAdpcmHalfBytePending_ = false;
+  }
+
+  recordingActive_ = false;
+  recordingReady_ = true;
+  recordingFinishedAtMs_ = now;
+
+  const uint32_t capturedDurationMs = static_cast<uint32_t>(
+    (static_cast<uint64_t>(recordingSampleCount_) * 1000ULL) /
+    kRecordingStoredSampleRateHz
+  );
+
+  Serial.printf("record=done duration_ms=%lu samples=%u bytes=%u elapsed_ms=%lu format=ima_adpcm\n",
+                static_cast<unsigned long>(capturedDurationMs),
+                static_cast<unsigned>(recordingSampleCount_),
+                static_cast<unsigned>(recordingEncodedByteCount_),
+                static_cast<unsigned long>(recordingFinishedAtMs_ - recordingStartedAtMs_));
 }
 
 void PdmMicrophone::resetWindowStats() {
@@ -329,6 +601,29 @@ void PdmMicrophone::accumulateSamples(const int16_t* samples, size_t sampleCount
     envelopeLevel_ =
       ((envelopeLevel_ * ((1UL << kEnvelopeShift) - 1UL)) + absCenteredSample) >> kEnvelopeShift;
     sampleCount_++;
+
+    if (recordingActive_ && recordingSampleCount_ < recordingTargetSampleCount_ &&
+        ((recordingInputSampleCount_++ % kRecordingDecimationFactor) == 0U)) {
+      int32_t clippedSample = centeredSample;
+      if (clippedSample > INT16_MAX) {
+        clippedSample = INT16_MAX;
+      } else if (clippedSample < INT16_MIN) {
+        clippedSample = INT16_MIN;
+      }
+
+      if (!appendRecordingSample(static_cast<int16_t>(clippedSample))) {
+        recordingActive_ = false;
+        recordingRequested_ = false;
+        recordingReady_ = false;
+        recordingSampleCount_ = 0;
+        recordingEncodedByteCount_ = 0;
+        recordingTargetSampleCount_ = 0;
+        requestedRecordingDurationMs_ = 0;
+        resetRecordingEncoding();
+        Serial.println("record=abort reason=no_memory");
+        break;
+      }
+    }
   }
 }
 
@@ -1017,6 +1312,15 @@ void PdmMicrophone::updateMeterLevel(uint32_t blockLevel) {
   const uint8_t releasedLevel =
     (meterLevel_ > kMeterReleaseStep) ? (meterLevel_ - kMeterReleaseStep) : 0;
   meterLevel_ = (releasedLevel > targetLevel) ? releasedLevel : targetLevel;
+}
+
+bool startMicrophoneRecording(uint32_t durationMs) {
+  if (gPrimaryMicrophone == nullptr) {
+    Serial.println("record=abort reason=mic_not_available");
+    return false;
+  }
+
+  return gPrimaryMicrophone->requestRecording(durationMs);
 }
 
 }  // namespace decaflash::brain

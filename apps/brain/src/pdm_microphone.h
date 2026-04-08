@@ -2,13 +2,33 @@
 
 #include <Arduino.h>
 
+#include "ima_adpcm.h"
+
 namespace decaflash::brain {
+
+struct RecordedAudioClip {
+  uint8_t* data = nullptr;
+  size_t byteCount = 0;
+  size_t sampleCount = 0;
+  uint32_t sampleRateHz = 0;
+};
+
+void releaseRecordedAudioClip(RecordedAudioClip& clip);
 
 class PdmMicrophone {
  public:
   bool begin();
   void update();
+  bool requestRecording(uint32_t durationMs);
   bool ready() const;
+  bool recordingActive() const;
+  bool recordingReady() const;
+  uint32_t recordingSampleRateHz() const;
+  size_t recordedSampleCount() const;
+  size_t recordedByteCount() const;
+  bool takeRecording(RecordedAudioClip& clip);
+  bool cancelRecording();
+  void clearRecording();
   uint8_t meterLevel() const;
   bool musicPresent() const;
   uint16_t detectedBpm() const;
@@ -17,6 +37,11 @@ class PdmMicrophone {
   uint32_t lastOnsetAtMs() const;
 
  private:
+  bool ensureRecordingBufferCapacity(size_t sampleCapacity);
+  void resetRecordingEncoding();
+  bool appendRecordingSample(int16_t sample);
+  void beginRequestedRecording(uint32_t now);
+  void finishRecording(uint32_t now);
   void resetWindowStats();
   void accumulateSamples(const int16_t* samples, size_t sampleCount);
   void printReport(uint32_t now);
@@ -71,6 +96,24 @@ class PdmMicrophone {
   uint8_t pulseHistoryCount_ = 0;
   uint8_t pulseHistoryIndex_ = 0;
   uint8_t pulseHistory_[64] = {0};
+  bool recordingRequested_ = false;
+  bool recordingActive_ = false;
+  bool recordingReady_ = false;
+  uint32_t requestedRecordingDurationMs_ = 0;
+  uint32_t recordingStartedAtMs_ = 0;
+  uint32_t recordingFinishedAtMs_ = 0;
+  size_t recordingBufferCapacity_ = 0;
+  size_t recordingTargetSampleCount_ = 0;
+  size_t recordingSampleCount_ = 0;
+  size_t recordingEncodedByteCount_ = 0;
+  uint32_t recordingInputSampleCount_ = 0;
+  uint8_t* recordingBuffer_ = nullptr;
+  ima_adpcm::State recordingAdpcmState_ = {};
+  uint8_t recordingAdpcmPartialByte_ = 0;
+  bool recordingAdpcmHalfBytePending_ = false;
+  bool recordingAdpcmSeeded_ = false;
 };
+
+bool startMicrophoneRecording(uint32_t durationMs = 0);
 
 }  // namespace decaflash::brain
