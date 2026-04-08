@@ -10,9 +10,10 @@ namespace decaflash::brain::api_client {
 void begin();
 void service(uint32_t now);
 bool busy();
+bool radioPauseActive();
 void cancelAiWork();
 bool queueCloudChattieInputToTextDisplay(const char* input);
 bool queueRecordedAudioToTextDisplay(RecordedAudioClip& recording, bool aiOwned);
-bool takeRecordedAudioCompletion(bool& processed);
+bool takeRecordedAudioCompletion(bool& processed, bool& wifiFailed);
 
 }  // namespace decaflash::brain::api_client

@@ -33,7 +33,10 @@ using decaflash::protocol::NodeStatusMessage;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
 static constexpr uint32_t COMMAND_REFRESH_MS = 60000;
-static constexpr uint32_t NODE_STALE_MS = 15000;
+// Node discovery is event-driven; heartbeats are only a fallback signal.
+// Keep stale time comfortably above the 30s node heartbeat so a missed
+// heartbeat does not turn into a false rediscovery.
+static constexpr uint32_t NODE_STALE_MS = 75000;
 static constexpr uint32_t NODE_RESTART_UPTIME_GRACE_MS = 2000;
 static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
@@ -229,6 +232,10 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
   queueNodeStatus(mac, status);
 }
 
+esp_err_t registerEspNowReceiveCallback() {
+  return esp_now_register_recv_cb(onEspNowReceive);
+}
+
 void printTrackedNode(const TrackedNode& node, const char* eventLabel) {
   char macBuffer[18] = {};
   formatMac(node.mac, macBuffer, sizeof(macBuffer));
@@ -355,10 +362,31 @@ void recoverEspNowIfNeeded(uint32_t now) {
   espNowReady = recovery.ok();
 
   if (!espNowReady) {
-    Serial.printf("ESP-NOW: recover_failed reason=%s init=%d peer=%d\n",
+    Serial.printf("ESP-NOW: recover_failed reason=%s wifi_init=%d wifi_mode=%d wifi_start=%d wifi_ch=%d deinit=%d init=%d peer=%d\n",
                   espNowRecoveryReason,
+                  static_cast<int>(recovery.wifiInit),
+                  static_cast<int>(recovery.wifiSetMode),
+                  static_cast<int>(recovery.wifiStart),
+                  static_cast<int>(recovery.wifiSetChannel),
+                  static_cast<int>(recovery.espNowDeinit),
                   static_cast<int>(recovery.espNowInit),
                   static_cast<int>(recovery.peer.addPeer));
+    return;
+  }
+
+  const esp_err_t receiveCallbackResult = registerEspNowReceiveCallback();
+  if (receiveCallbackResult != ESP_OK) {
+    espNowReady = false;
+    Serial.printf("ESP-NOW: recover_failed reason=%s wifi_init=%d wifi_mode=%d wifi_start=%d wifi_ch=%d deinit=%d init=%d peer=%d recv_cb=%d\n",
+                  espNowRecoveryReason,
+                  static_cast<int>(recovery.wifiInit),
+                  static_cast<int>(recovery.wifiSetMode),
+                  static_cast<int>(recovery.wifiStart),
+                  static_cast<int>(recovery.wifiSetChannel),
+                  static_cast<int>(recovery.espNowDeinit),
+                  static_cast<int>(recovery.espNowInit),
+                  static_cast<int>(recovery.peer.addPeer),
+                  static_cast<int>(receiveCallbackResult));
     return;
   }
 
@@ -639,6 +667,13 @@ void selectNextScene();
 void activateBrain();
 
 void handleButtonInput(uint32_t now) {
+  if (decaflash::brain::api_client::radioPauseActive()) {
+    buttonPressedLastLoop = M5.Btn.isPressed();
+    buttonLongPressHandled = false;
+    buttonPressedAtMs = now;
+    return;
+  }
+
   const bool buttonPressed = M5.Btn.isPressed();
 
   if (buttonPressed && !buttonPressedLastLoop) {
@@ -682,6 +717,16 @@ void updateBeatDotOverlay(uint32_t now) {
   decaflash::brain::matrix::clearBeatDotPixel();
 }
 
+void updateStatusPixelOverlay(uint32_t now) {
+  uint32_t colorValue = 0;
+  if (decaflash::brain::wifi_manager::statusPixelColor(now, colorValue)) {
+    decaflash::brain::matrix::drawStatusPixelOverlay(colorValue);
+    return;
+  }
+
+  decaflash::brain::matrix::clearStatusPixel();
+}
+
 void updateIdleMatrixUi(uint32_t now) {
   if (decaflash::brain::text_playback::serviceMatrix(now)) {
     return;
@@ -714,7 +759,9 @@ void onBeat() {
   syncBeatDotPending = false;
   beatDotUntilMs = millis() + BEAT_DOT_FLASH_MS;
 
-  if (espNowReady && pendingClockSync) {
+  if (!decaflash::brain::api_client::radioPauseActive() &&
+      espNowReady &&
+      pendingClockSync) {
     const auto sync = makeClockSyncMessage(
       clockRevision,
       ++beatSerial,
@@ -751,7 +798,7 @@ void onBeat() {
 }
 
 void sendFlashCommand(NodeEffect targetNodeEffect, const decaflash::FlashCommand& command) {
-  if (!espNowReady || !brainLive) {
+  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || !brainLive) {
     return;
   }
 
@@ -781,7 +828,7 @@ void sendFlashCommand(NodeEffect targetNodeEffect, const decaflash::FlashCommand
 }
 
 void sendRgbCommand(NodeEffect targetNodeEffect, const decaflash::RgbCommand& command) {
-  if (!espNowReady || !brainLive) {
+  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || !brainLive) {
     return;
   }
 
@@ -811,7 +858,7 @@ void sendRgbCommand(NodeEffect targetNodeEffect, const decaflash::RgbCommand& co
 }
 
 void sendCurrentCommands() {
-  if (!espNowReady || !brainLive) {
+  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || !brainLive) {
     return;
   }
 
@@ -825,7 +872,7 @@ void sendCurrentCommands() {
 }
 
 void sendBrainHello() {
-  if (!espNowReady || brainLive) {
+  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || brainLive) {
     return;
   }
 
@@ -905,14 +952,22 @@ void setup() {
   const auto initResult = initEspNow();
   const auto peerResult = initResult.ok() ? ensureBroadcastPeer() : decltype(ensureBroadcastPeer()){};
   espNowReady = initResult.ok() && peerResult.ok();
+  esp_err_t receiveCallbackResult = ESP_ERR_ESPNOW_NOT_INIT;
+  if (espNowReady) {
+    receiveCallbackResult = registerEspNowReceiveCallback();
+    if (receiveCallbackResult != ESP_OK) {
+      espNowReady = false;
+    }
+  }
 
   Serial.printf("WIFI: set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
   Serial.printf("WIFI: start=%d\n", static_cast<int>(initResult.wifiStart));
   Serial.printf("WIFI: set_channel=%d\n", static_cast<int>(initResult.wifiSetChannel));
   Serial.printf("ESP-NOW: init=%d\n", static_cast<int>(initResult.espNowInit));
-  Serial.printf("ESP-NOW: state=%s\n", initResult.ok() ? "ok" : "failed");
+  Serial.printf("ESP-NOW: state=%s\n", espNowReady ? "ok" : "failed");
   Serial.printf("ESP-NOW: peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
   Serial.printf("ESP-NOW: add_peer=%d\n", static_cast<int>(peerResult.addPeer));
+  Serial.printf("ESP-NOW: recv_cb=%d\n", static_cast<int>(receiveCallbackResult));
   Serial.printf("STARTUP: mode=%s\n", espNowReady ? "silent start" : "startup only");
   Serial.println("BUTTON: press start/next scene");
   decaflash::brain::shell::printHelp();
@@ -942,20 +997,24 @@ void loop() {
         decaflash::brain::ai_mode::ownsRecording());
     if (!queued) {
       Serial.println("RECORD: process_queue_failed");
-      if (!decaflash::brain::wifi_manager::isConnected() &&
-          decaflash::brain::ai_mode::ownsRecording()) {
-        decaflash::brain::ai_mode::handleWifiFailure(now);
-      } else {
-        decaflash::brain::ai_mode::handleRecordingProcessed(now, false);
-      }
+      decaflash::brain::ai_mode::handleRecordingProcessed(now, false);
     }
   }
   bool audioProcessingSucceeded = false;
-  if (decaflash::brain::api_client::takeRecordedAudioCompletion(audioProcessingSucceeded)) {
-    decaflash::brain::ai_mode::handleRecordingProcessed(now, audioProcessingSucceeded);
+  bool audioProcessingWifiFailed = false;
+  if (decaflash::brain::api_client::takeRecordedAudioCompletion(
+        audioProcessingSucceeded,
+        audioProcessingWifiFailed)) {
+    if (audioProcessingWifiFailed && decaflash::brain::ai_mode::ownsRecording()) {
+      decaflash::brain::ai_mode::handleWifiFailure(now);
+    } else {
+      decaflash::brain::ai_mode::handleRecordingProcessed(now, audioProcessingSucceeded);
+    }
   }
   decaflash::brain::ai_mode::service(now, microphone);
   serviceEspNowState(now);
+  processPendingNodeStatuses(now);
+  expireTrackedNodes(now);
 
   if (brainLive && pendingCommandRefresh) {
     sendCurrentCommands();
@@ -993,4 +1052,5 @@ void loop() {
 
   updateIdleMatrixUi(now);
   updateBeatDotOverlay(now);
+  updateStatusPixelOverlay(now);
 }

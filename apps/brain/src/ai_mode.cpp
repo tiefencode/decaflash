@@ -6,29 +6,25 @@
 #include "matrix_ui.h"
 #include "pdm_microphone.h"
 #include "text_playback.h"
-#include "wifi_manager.h"
 
 namespace decaflash::brain::ai_mode {
 
 namespace {
 
 static constexpr uint32_t kTogglePressMs = 1200;
-static constexpr uint32_t kWifiFailedDisplayMs = 1500;
 static constexpr uint32_t kToggleDisplayMs = 780;
 static constexpr uint32_t kMusicStableMs = 1500;
 static constexpr uint32_t kRecognitionFallbackMs = 1200;
 static constexpr uint32_t kRecognitionRecentOnsetMs = 180;
 static constexpr uint8_t kRecognitionMinBeatConfidence = 18;
 static constexpr uint32_t kFailureCooldownMs = 30000;
-static constexpr uint32_t kSuccessCooldownMs = 240000;
+static constexpr uint32_t kSuccessCooldownMs = 300000;
 static constexpr uint32_t kRecordDurationMs = 12000;
 
 enum class TransientIcon : uint8_t {
   None = 0,
-  WifiConnected = 1,
-  WifiFailed = 2,
-  AiEnabled = 3,
-  AiDisabled = 4,
+  AiEnabled = 1,
+  AiDisabled = 2,
 };
 
 bool aiModeEnabled = false;
@@ -65,14 +61,6 @@ void clearTransientIcon() {
 
 void drawTransientIcon(uint32_t now) {
   switch (transientIcon) {
-    case TransientIcon::WifiConnected:
-      decaflash::brain::matrix::drawWifiConnectedIcon(transientIconColor);
-      break;
-
-    case TransientIcon::WifiFailed:
-      decaflash::brain::matrix::drawWifiFailedIcon(transientIconColor);
-      break;
-
     case TransientIcon::AiEnabled:
       decaflash::brain::matrix::drawAiWaveAnimation(
         now - (transientIconUntilMs - kToggleDisplayMs),
@@ -112,7 +100,6 @@ void disableForWifiFailure(uint32_t now, const char* reason) {
   aiReadyToListenAtMs = 0;
   aiCooldownUntilMs = 0;
   resetListeningWindow();
-  showTransientIcon(TransientIcon::WifiFailed, 0xFF0000, kWifiFailedDisplayMs);
   Serial.printf("AI: disabled reason=%s\n", reason);
 }
 
@@ -259,7 +246,10 @@ void handleWifiFailure(uint32_t now) {
 }
 
 bool useAiMeterTheme(const PdmMicrophone& microphone) {
-  return aiRecordingOwned || microphone.recordingActive() || microphone.recordingReady();
+  return aiRecordingOwned ||
+         microphone.recordingActive() ||
+         microphone.recordingReady() ||
+         decaflash::brain::api_client::radioPauseActive();
 }
 
 bool ownsRecording() {

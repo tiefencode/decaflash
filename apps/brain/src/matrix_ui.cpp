@@ -10,6 +10,7 @@ namespace decaflash::brain::matrix {
 namespace {
 
 static constexpr uint8_t kMatrixPixelCount = 25;
+static constexpr uint8_t kStatusPixelIndex = 0;
 static constexpr uint8_t kBeatDotPixelIndex = 4;
 static constexpr uint8_t kMatrixWidth = 5;
 static constexpr uint8_t kMatrixHeight = 5;
@@ -92,14 +93,6 @@ static constexpr Glyph kTextGlyphs[] = {
   {kGlyphUmlautO, {0b01010, 0b01110, 0b10001, 0b10001, 0b01110}},
   {kGlyphUmlautU, {0b01010, 0b10001, 0b10001, 0b10001, 0b01110}},
   {kGlyphSharpS, {0b01110, 0b10000, 0b01110, 0b10001, 0b11110}},
-};
-
-static constexpr uint8_t kWifiFailedIconMask[5] = {
-  0b00000,
-  0b00000,
-  0b00100,
-  0b00000,
-  0b00000,
 };
 
 static constexpr uint8_t kSpeakerIconMask[5] = {
@@ -306,52 +299,6 @@ void drawPixel(int8_t x, int8_t y, uint32_t colorValue) {
   setFramePixel(static_cast<uint8_t>(y) * 5U + static_cast<uint8_t>(x), colorValue);
 }
 
-void drawWifiCenterDot(uint32_t colorValue, uint8_t scale = 255) {
-  drawPixel(2, 2, scaleColor(colorValue, scale));
-}
-
-void drawWifiOuterRing(uint32_t colorValue,
-                       uint8_t edgeScale = 255,
-                       uint8_t cornerScale = 110) {
-  const uint32_t edgeColor = scaleColor(colorValue, edgeScale);
-  const uint32_t cornerColor = scaleColor(colorValue, cornerScale);
-
-  drawPixel(0, 0, cornerColor);
-  drawPixel(1, 0, edgeColor);
-  drawPixel(2, 0, edgeColor);
-  drawPixel(3, 0, edgeColor);
-  drawPixel(4, 0, cornerColor);
-
-  drawPixel(0, 1, edgeColor);
-  drawPixel(4, 1, edgeColor);
-  drawPixel(0, 2, edgeColor);
-  drawPixel(4, 2, edgeColor);
-  drawPixel(0, 3, edgeColor);
-  drawPixel(4, 3, edgeColor);
-
-  drawPixel(0, 4, cornerColor);
-  drawPixel(1, 4, edgeColor);
-  drawPixel(2, 4, edgeColor);
-  drawPixel(3, 4, edgeColor);
-  drawPixel(4, 4, cornerColor);
-}
-
-void drawWifiInnerRing(uint32_t colorValue,
-                       uint8_t cardinalScale = 144,
-                       uint8_t diagonalScale = 92) {
-  const uint32_t cardinalColor = scaleColor(colorValue, cardinalScale);
-  const uint32_t diagonalColor = scaleColor(colorValue, diagonalScale);
-
-  drawPixel(1, 1, diagonalColor);
-  drawPixel(2, 1, cardinalColor);
-  drawPixel(3, 1, diagonalColor);
-  drawPixel(1, 2, cardinalColor);
-  drawPixel(3, 2, cardinalColor);
-  drawPixel(1, 3, diagonalColor);
-  drawPixel(2, 3, cardinalColor);
-  drawPixel(3, 3, diagonalColor);
-}
-
 }  // namespace
 
 void clearAllPixels() {
@@ -361,8 +308,13 @@ void clearAllPixels() {
 
 void clearMatrix() {
   clearFrameBuffer();
+  setFramePixel(kStatusPixelIndex, 0x000000);
   setFramePixel(kBeatDotPixelIndex, 0x000000);
   flushFrameBuffer();
+}
+
+void clearStatusPixel() {
+  M5.dis.drawpix(kStatusPixelIndex, 0x000000);
 }
 
 void clearBeatDotPixel() {
@@ -393,6 +345,10 @@ void drawSceneNumber(size_t sceneIndex) {
 
 void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
   M5.dis.drawpix(kBeatDotPixelIndex, beatDotColor(beatDotBeat, beatDotColorOverride));
+}
+
+void drawStatusPixelOverlay(uint32_t colorValue) {
+  M5.dis.drawpix(kStatusPixelIndex, colorValue);
 }
 
 size_t measureTextColumns(const uint8_t* text, size_t length) {
@@ -502,59 +458,6 @@ void drawTextWindow(const uint8_t* text,
     }
   }
 
-  flushFrameBuffer();
-}
-
-void drawWifiIcon(uint32_t colorValue) {
-  drawWifiConnectedIcon(colorValue);
-}
-
-void drawWifiConnectedIcon(uint32_t colorValue) {
-  clearFrameBuffer();
-  drawWifiOuterRing(colorValue, 220, 116);
-  drawWifiCenterDot(colorValue);
-  flushFrameBuffer();
-}
-
-void drawWifiConnectingIcon(uint32_t now, uint32_t colorValue) {
-  clearFrameBuffer();
-
-  const uint32_t pulsePhase = now % 720U;
-  const uint32_t pulseRamp = (pulsePhase < 360U) ? pulsePhase : (720U - pulsePhase);
-  const uint8_t centerScale =
-    static_cast<uint8_t>(72U + ((pulseRamp * 183U) / 360U));
-
-  const uint8_t frame = static_cast<uint8_t>((now / 115U) % 5U);
-
-  switch (frame) {
-    case 0:
-      break;
-
-    case 1:
-      drawWifiInnerRing(colorValue, 96, 56);
-      break;
-
-    case 2:
-      drawWifiInnerRing(colorValue, 144, 88);
-      break;
-
-    case 3:
-      drawWifiOuterRing(colorValue, 128, 68);
-      break;
-
-    case 4:
-    default:
-      drawWifiOuterRing(colorValue, 190, 104);
-      break;
-  }
-
-  drawWifiCenterDot(colorValue, centerScale);
-  flushFrameBuffer();
-}
-
-void drawWifiFailedIcon(uint32_t colorValue) {
-  clearFrameBuffer();
-  drawMask(kWifiFailedIconMask, colorValue);
   flushFrameBuffer();
 }
 

@@ -8,8 +8,9 @@ namespace decaflash::brain::matrix {
 namespace {
 
 static constexpr uint8_t kMatrixPixelCount = 25;
+static constexpr uint8_t kStatusPixelIndex = 0;
 static constexpr uint8_t kBeatDotPixelIndex = 4;
-static constexpr uint8_t kMeterDrawablePixelCount = kMatrixPixelCount - 1;
+static constexpr uint8_t kMeterDrawablePixelCount = kMatrixPixelCount - 2;
 static constexpr uint32_t kMeterDriftIntervalMs = 220;
 static constexpr uint8_t kMeterRiseStep = 18;
 static constexpr uint8_t kMeterFallStep = 14;
@@ -47,7 +48,7 @@ uint32_t color(uint8_t r, uint8_t g, uint8_t b) {
 
 void clearMatrix() {
   for (uint8_t i = 0; i < kMatrixPixelCount; ++i) {
-    if (i == kBeatDotPixelIndex) {
+    if (i == kStatusPixelIndex || i == kBeatDotPixelIndex) {
       continue;
     }
 
@@ -64,7 +65,7 @@ void swapPixelOrder(uint8_t left, uint8_t right) {
 void initializeMeterPixelOrder() {
   uint8_t slot = 0;
   for (uint8_t pixel = 0; pixel < kMatrixPixelCount; ++pixel) {
-    if (pixel == kBeatDotPixelIndex) {
+    if (pixel == kStatusPixelIndex || pixel == kBeatDotPixelIndex) {
       continue;
     }
 
@@ -162,7 +163,7 @@ void updateMeterPixelLevels(uint8_t filledPixels) {
   }
 
   for (uint8_t pixel = 0; pixel < kMatrixPixelCount; ++pixel) {
-    if (pixel == kBeatDotPixelIndex) {
+    if (pixel == kStatusPixelIndex || pixel == kBeatDotPixelIndex) {
       continue;
     }
 
@@ -201,7 +202,9 @@ void drawMicrophoneMeter(uint8_t filledPixels, MeterTheme theme) {
   }
 
   for (uint8_t pixel = 0; pixel < kMatrixPixelCount; ++pixel) {
-    if (pixel == kBeatDotPixelIndex || meterPixelLevels[pixel] == 0) {
+    if (pixel == kStatusPixelIndex ||
+        pixel == kBeatDotPixelIndex ||
+        meterPixelLevels[pixel] == 0) {
       continue;
     }
 

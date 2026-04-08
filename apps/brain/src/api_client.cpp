@@ -206,8 +206,10 @@ uint32_t completedDisplayAtMs = 0;
 CloudJobOwner completedDisplayOwner = CloudJobOwner::Manual;
 bool recordedAudioCompletionPending = false;
 bool recordedAudioProcessed = false;
+bool recordedAudioWifiFailed = false;
 CloudJobOwner recordedAudioCompletionOwner = CloudJobOwner::Manual;
 uint32_t aiCancelGeneration = 1;
+bool managedWifiSessionActive = false;
 
 void clearQueuedJobLocked() {
   queuedCloudJob.type = CloudJobType::None;
@@ -888,6 +890,25 @@ void cloudWorkerTask(void* parameter) {
     bool processed = false;
     char displayText[kCloudTextCapacity] = {};
 
+    if (!ensureWifiConnected()) {
+      releaseRecordedAudioClip(localJob.recording);
+
+      const bool aiJobCanceled =
+        (localJob.owner == CloudJobOwner::Ai) &&
+        (localJob.aiGeneration != aiCancelGeneration);
+
+      portENTER_CRITICAL(&cloudJobMux);
+      cloudJobRunning = false;
+      if (!aiJobCanceled && localJob.type == CloudJobType::RecordedAudio) {
+        recordedAudioCompletionPending = true;
+        recordedAudioProcessed = false;
+        recordedAudioWifiFailed = true;
+        recordedAudioCompletionOwner = localJob.owner;
+      }
+      portEXIT_CRITICAL(&cloudJobMux);
+      continue;
+    }
+
     switch (localJob.type) {
       case CloudJobType::Prompt:
         processed = fetchCloudChattieText(
@@ -938,6 +959,7 @@ void cloudWorkerTask(void* parameter) {
     if (!aiJobCanceled && localJob.type == CloudJobType::RecordedAudio) {
       recordedAudioCompletionPending = true;
       recordedAudioProcessed = processed;
+      recordedAudioWifiFailed = false;
       recordedAudioCompletionOwner = localJob.owner;
     }
     portEXIT_CRITICAL(&cloudJobMux);
@@ -984,6 +1006,7 @@ bool queueCloudJob(CloudQueuedJob& job) {
   if (!jobBusy) {
     queuedCloudJob = job;
     cloudJobQueued = true;
+    managedWifiSessionActive = true;
   }
   portEXIT_CRITICAL(&cloudJobMux);
 
@@ -1003,10 +1026,15 @@ void begin() {
 }
 
 void service(uint32_t now) {
+  bool shouldStopManagedWifiSession = false;
   bool shouldStartText = false;
   char textBuffer[kCloudTextCapacity] = {};
 
   portENTER_CRITICAL(&cloudJobMux);
+  shouldStopManagedWifiSession =
+    managedWifiSessionActive &&
+    !cloudJobQueued &&
+    !cloudJobRunning;
   if (completedDisplayPending &&
       !decaflash::brain::text_playback::isActive() &&
       static_cast<int32_t>(now - completedDisplayAtMs) >= 0) {
@@ -1017,6 +1045,12 @@ void service(uint32_t now) {
     shouldStartText = textBuffer[0] != '\0';
   }
   portEXIT_CRITICAL(&cloudJobMux);
+
+  if (shouldStopManagedWifiSession) {
+    decaflash::brain::wifi_manager::disconnect();
+    managedWifiSessionActive = false;
+    Serial.println("API: wifi_session stopped");
+  }
 
   if (shouldStartText) {
     decaflash::brain::text_playback::start(textBuffer);
@@ -1033,6 +1067,10 @@ bool busy() {
   isBusy = cloudJobQueued || cloudJobRunning || completedDisplayPending;
   portEXIT_CRITICAL(&cloudJobMux);
   return isBusy;
+}
+
+bool radioPauseActive() {
+  return managedWifiSessionActive;
 }
 
 void cancelAiWork() {
@@ -1055,6 +1093,7 @@ void cancelAiWork() {
   if (recordedAudioCompletionPending && recordedAudioCompletionOwner == CloudJobOwner::Ai) {
     recordedAudioCompletionPending = false;
     recordedAudioProcessed = false;
+    recordedAudioWifiFailed = false;
     recordedAudioCompletionOwner = CloudJobOwner::Manual;
   }
   portEXIT_CRITICAL(&cloudJobMux);
@@ -1069,10 +1108,6 @@ bool queueCloudChattieInputToTextDisplay(const char* input) {
 
   if (input == nullptr || input[0] == '\0') {
     Serial.println("API: chattie_missing_input");
-    return false;
-  }
-
-  if (!ensureWifiConnected()) {
     return false;
   }
 
@@ -1102,11 +1137,6 @@ bool queueRecordedAudioToTextDisplay(RecordedAudioClip& recording, bool aiOwned)
     return false;
   }
 
-  if (!ensureWifiConnected()) {
-    releaseRecordedAudioClip(recording);
-    return false;
-  }
-
   CloudQueuedJob job = {};
   job.type = CloudJobType::RecordedAudio;
   job.owner = aiOwned ? CloudJobOwner::Ai : CloudJobOwner::Manual;
@@ -1117,14 +1147,16 @@ bool queueRecordedAudioToTextDisplay(RecordedAudioClip& recording, bool aiOwned)
   return queueCloudJob(job);
 }
 
-bool takeRecordedAudioCompletion(bool& processed) {
+bool takeRecordedAudioCompletion(bool& processed, bool& wifiFailed) {
   bool available = false;
 
   portENTER_CRITICAL(&cloudJobMux);
   if (recordedAudioCompletionPending) {
     processed = recordedAudioProcessed;
+    wifiFailed = recordedAudioWifiFailed;
     recordedAudioCompletionPending = false;
     recordedAudioProcessed = false;
+    recordedAudioWifiFailed = false;
     recordedAudioCompletionOwner = CloudJobOwner::Manual;
     available = true;
   }

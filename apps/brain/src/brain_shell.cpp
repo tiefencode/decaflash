@@ -101,7 +101,8 @@ void handleCommand(const char* commandLine) {
   }
 
   if (strcmp(commandLine, "wifi connect") == 0) {
-    decaflash::brain::wifi_manager::connect();
+    Serial.println("WIFI: warning manual_connect_can_pause_espnow if_channel!=1");
+    decaflash::brain::wifi_manager::connect(true);
     return;
   }
 
@@ -131,7 +132,7 @@ void printHelp() {
   Serial.println("  record <duration_ms>");
   Serial.println("  wifi status");
   Serial.println("  wifi scan");
-  Serial.println("  wifi connect");
+  Serial.println("  wifi connect      # may pause ESP-NOW if AP channel != 1");
   Serial.println("  wifi disconnect");
 }
 

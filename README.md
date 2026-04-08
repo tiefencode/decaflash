@@ -124,7 +124,7 @@ Current `brain` serial commands:
 - `record 3000`
 - `wifi status`
 - `wifi scan`
-- `wifi connect`
+- `wifi connect`  # manual Wi-Fi can pause ESP-NOW if the AP is not on channel 1
 - `wifi disconnect`
 
 ## Brain Controls

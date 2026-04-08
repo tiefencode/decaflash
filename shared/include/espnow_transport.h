@@ -43,6 +43,8 @@ struct PeerResult {
 };
 
 struct RecoveryResult {
+  esp_err_t wifiInit = ESP_FAIL;
+  esp_err_t wifiSetMode = ESP_FAIL;
   esp_err_t wifiStart = ESP_FAIL;
   esp_err_t wifiSetChannel = ESP_FAIL;
   esp_err_t espNowDeinit = ESP_FAIL;
@@ -50,9 +52,12 @@ struct RecoveryResult {
   PeerResult peer = {};
 
   bool ok() const {
+    const bool wifiInitOk = wifiInit == ESP_OK || wifiInit == ESP_ERR_WIFI_INIT_STATE;
     const bool wifiStartOk = wifiStart == ESP_OK || wifiStart == ESP_ERR_WIFI_CONN;
     const bool deinitOk = espNowDeinit == ESP_OK || espNowDeinit == ESP_ERR_ESPNOW_NOT_INIT;
-    return wifiStartOk &&
+    return wifiInitOk &&
+           wifiSetMode == ESP_OK &&
+           wifiStartOk &&
            wifiSetChannel == ESP_OK &&
            deinitOk &&
            espNowInit == ESP_OK &&
@@ -125,6 +130,17 @@ inline bool stationAssociated() {
 
 inline RecoveryResult recoverEspNow() {
   RecoveryResult result;
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  result.wifiInit = esp_wifi_init(&cfg);
+  if (result.wifiInit != ESP_OK && result.wifiInit != ESP_ERR_WIFI_INIT_STATE) {
+    return result;
+  }
+
+  result.wifiSetMode = esp_wifi_set_mode(WIFI_MODE_STA);
+  if (result.wifiSetMode != ESP_OK) {
+    return result;
+  }
 
   result.wifiStart = esp_wifi_start();
   if (result.wifiStart != ESP_OK && result.wifiStart != ESP_ERR_WIFI_CONN) {

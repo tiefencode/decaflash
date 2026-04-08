@@ -23,18 +23,19 @@ namespace {
 static constexpr uint32_t kConnectTimeoutMs = 15000;
 static constexpr uint32_t kConnectPollMs = 250;
 static constexpr uint8_t kScanListLimit = 12;
+static constexpr uint32_t kConnectedIndicatorMs = 2000;
+static constexpr uint32_t kFailedIndicatorMs = 1500;
 
-uint32_t wifiPulseColor(uint32_t now) {
-  const uint32_t cycleMs = 820;
-  const uint32_t phase = now % cycleMs;
-  const uint32_t halfCycleMs = cycleMs / 2U;
-  const uint32_t ramp = (phase < halfCycleMs) ? phase : (cycleMs - phase);
-  const uint32_t intensity = (ramp * 255U) / halfCycleMs;
-  const uint8_t red = static_cast<uint8_t>(35U + ((intensity * 220U) / 255U));
-  const uint8_t green = static_cast<uint8_t>(12U + ((intensity * 208U) / 255U));
-  return (static_cast<uint32_t>(red) << 16) |
-         (static_cast<uint32_t>(green) << 8);
-}
+enum class StatusIndicator : uint8_t {
+  Idle = 0,
+  Connecting = 1,
+  Connected = 2,
+  Failed = 3,
+};
+
+StatusIndicator statusIndicator = StatusIndicator::Idle;
+uint32_t connectedIndicatorUntilMs = 0;
+uint32_t failedIndicatorUntilMs = 0;
 
 bool hasNonEmptyCredentials() {
   return decaflash::secrets::kWifiSsid[0] != '\0';
@@ -59,6 +60,36 @@ const char* statusName(wl_status_t status) {
     default:
       return "unknown";
   }
+}
+
+void setFailedIndicator(uint32_t now) {
+  statusIndicator = StatusIndicator::Failed;
+  connectedIndicatorUntilMs = 0;
+  failedIndicatorUntilMs = now + kFailedIndicatorMs;
+}
+
+void setConnectedIndicator(uint32_t now) {
+  statusIndicator = StatusIndicator::Connected;
+  connectedIndicatorUntilMs = now + kConnectedIndicatorMs;
+  failedIndicatorUntilMs = 0;
+}
+
+uint32_t yellowPulseColor(uint32_t now) {
+  const uint32_t pulsePhase = now % 720U;
+  const uint32_t pulseRamp = (pulsePhase < 360U) ? pulsePhase : (720U - pulsePhase);
+  const uint8_t intensity = static_cast<uint8_t>(72U + ((pulseRamp * 183U) / 360U));
+  return (static_cast<uint32_t>(intensity) << 16) |
+         (static_cast<uint32_t>((intensity * 208U) / 255U) << 8);
+}
+
+void renderStatusPixelNow(uint32_t now) {
+  uint32_t colorValue = 0;
+  if (statusPixelColor(now, colorValue)) {
+    decaflash::brain::matrix::drawStatusPixelOverlay(colorValue);
+    return;
+  }
+
+  decaflash::brain::matrix::clearStatusPixel();
 }
 
 bool targetSsidVisible(bool verbose) {
@@ -116,20 +147,30 @@ uint8_t currentChannel() {
   return isConnected() ? static_cast<uint8_t>(WiFi.channel()) : 0;
 }
 
-bool connect() {
+bool connect(bool renderStatus) {
   if (!credentialsAvailable()) {
     Serial.println("WIFI: missing_credentials file=include/wifi_credentials.h");
+    setFailedIndicator(millis());
+    if (renderStatus) {
+      renderStatusPixelNow(millis());
+    }
     return false;
   }
 
   if (isConnected()) {
+    setConnectedIndicator(millis());
     Serial.printf("WIFI: connected ssid=%s ip=%s\n",
                   WiFi.SSID().c_str(),
                   WiFi.localIP().toString().c_str());
     return true;
   }
 
-  decaflash::brain::matrix::drawWifiConnectingIcon(millis(), wifiPulseColor(millis()));
+  statusIndicator = StatusIndicator::Connecting;
+  connectedIndicatorUntilMs = 0;
+  failedIndicatorUntilMs = 0;
+  if (renderStatus) {
+    renderStatusPixelNow(millis());
+  }
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
   delay(150);
@@ -137,9 +178,15 @@ bool connect() {
 
   const uint32_t startedAtMs = millis();
   while ((millis() - startedAtMs) < kConnectTimeoutMs) {
-    decaflash::brain::matrix::drawWifiConnectingIcon(millis(), wifiPulseColor(millis()));
+    if (renderStatus) {
+      renderStatusPixelNow(millis());
+    }
 
     if (isConnected()) {
+      setConnectedIndicator(millis());
+      if (renderStatus) {
+        renderStatusPixelNow(millis());
+      }
       Serial.printf("WIFI: connected ssid=%s ip=%s rssi=%d\n",
                     WiFi.SSID().c_str(),
                     WiFi.localIP().toString().c_str(),
@@ -151,6 +198,11 @@ bool connect() {
   }
 
   const wl_status_t status = WiFi.status();
+  WiFi.disconnect(true, false);
+  setFailedIndicator(millis());
+  if (renderStatus) {
+    renderStatusPixelNow(millis());
+  }
   Serial.printf("WIFI: connect_failed status=%d name=%s\n",
                 static_cast<int>(status),
                 statusName(status));
@@ -158,17 +210,68 @@ bool connect() {
 }
 
 void disconnect() {
-  if (!isConnected()) {
-    const wl_status_t status = WiFi.status();
-    Serial.printf("WIFI: idle status=%d name=%s\n",
-                  static_cast<int>(status),
-                  statusName(status));
+  const wl_status_t status = WiFi.status();
+  const bool wasConnected = status == WL_CONNECTED;
+  const String ssid = wasConnected ? WiFi.SSID() : String();
+
+  WiFi.disconnect(true, false);
+
+  if (statusIndicator != StatusIndicator::Failed) {
+    statusIndicator = StatusIndicator::Idle;
+    connectedIndicatorUntilMs = 0;
+    failedIndicatorUntilMs = 0;
+  }
+
+  if (wasConnected) {
+    Serial.printf("WIFI: disconnected ssid=%s\n", ssid.c_str());
     return;
   }
 
-  const String ssid = WiFi.SSID();
-  WiFi.disconnect(true, false);
-  Serial.printf("WIFI: disconnected ssid=%s\n", ssid.c_str());
+  Serial.printf("WIFI: idle status=%d name=%s\n",
+                static_cast<int>(status),
+                statusName(status));
+}
+
+bool statusPixelColor(uint32_t now, uint32_t& colorValue) {
+  if (statusIndicator == StatusIndicator::Failed) {
+    if ((int32_t)(now - failedIndicatorUntilMs) < 0) {
+      colorValue = 0xFF0000;
+      return true;
+    }
+
+    statusIndicator = StatusIndicator::Idle;
+    failedIndicatorUntilMs = 0;
+  }
+
+  if (!isConnected() && statusIndicator == StatusIndicator::Connected) {
+    statusIndicator = StatusIndicator::Idle;
+    connectedIndicatorUntilMs = 0;
+  }
+
+  switch (statusIndicator) {
+    case StatusIndicator::Connecting:
+      colorValue = yellowPulseColor(now);
+      return true;
+
+    case StatusIndicator::Connected:
+      if ((int32_t)(now - connectedIndicatorUntilMs) >= 0) {
+        statusIndicator = StatusIndicator::Idle;
+        connectedIndicatorUntilMs = 0;
+        colorValue = 0;
+        return false;
+      }
+      colorValue = 0x00FF00;
+      return true;
+
+    case StatusIndicator::Failed:
+      colorValue = 0xFF0000;
+      return true;
+
+    case StatusIndicator::Idle:
+    default:
+      colorValue = 0;
+      return false;
+  }
 }
 
 void scan() {
