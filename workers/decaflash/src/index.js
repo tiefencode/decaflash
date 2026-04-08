@@ -13,6 +13,10 @@ const IMA_INDEX_TABLE = [
   -1, -1, -1, -1, 2, 4, 6, 8,
   -1, -1, -1, -1, 2, 4, 6, 8,
 ];
+const IMA_BLOCK_SAMPLE_COUNT = 256;
+const DEBUG_WAV_CACHE_URL = "https://decaflash-debug.internal/api/debug/last.wav";
+const DEBUG_JSON_CACHE_URL = "https://decaflash-debug.internal/api/debug/last.json";
+const DEBUG_CACHE_SECONDS = 3600;
 
 export default {
   async fetch(request, env) {
@@ -32,6 +36,14 @@ export default {
     }
 
     try {
+      if (url.pathname === "/api/debug/last.wav") {
+        return await getDebugAsset(DEBUG_WAV_CACHE_URL);
+      }
+
+      if (url.pathname === "/api/debug/last.json") {
+        return await getDebugAsset(DEBUG_JSON_CACHE_URL);
+      }
+
       if (url.pathname === "/api/chattie") {
         return await handleChattie(request, env);
       }
@@ -128,6 +140,7 @@ async function handleAudd(request, env) {
 
   const encoding = stringField(form.get("encoding"));
   let uploadFile = file;
+  let debugWavBytes = null;
   const requestInfo = {
     encoding: encoding || "passthrough",
     original_file_bytes: file.size,
@@ -137,18 +150,24 @@ async function handleAudd(request, env) {
     const sampleRateHz = integerField(form.get("sample_rate_hz"));
     const sampleCount = integerField(form.get("sample_count"));
     const container = stringField(form.get("container"));
-
-    if (encoding !== "ima_adpcm" || container !== "decaflash_ima_adpcm") {
-      return jsonResponse({ error: "unsupported_audio_encoding" }, 400);
-    }
     if (!sampleRateHz || !sampleCount) {
       return jsonResponse({ error: "missing_audio_metadata" }, 400);
     }
 
     const compressed = new Uint8Array(await file.arrayBuffer());
-    const pcmSamples = decodeDecaflashImaAdpcm(compressed, sampleCount);
+    let pcmSamples;
+
+    if (encoding === "ima_adpcm" && container === "decaflash_ima_adpcm") {
+      pcmSamples = decodeDecaflashImaAdpcm(compressed, sampleCount);
+    } else if (encoding === "mulaw" && container === "decaflash_mulaw") {
+      pcmSamples = decodeDecaflashMuLaw(compressed, sampleCount);
+    } else {
+      return jsonResponse({ error: "unsupported_audio_encoding" }, 400);
+    }
+
     const pcmSummary = summarizePcm(pcmSamples);
     const wavBytes = buildMono16BitWav(pcmSamples, sampleRateHz);
+    debugWavBytes = wavBytes;
     uploadFile = new File([wavBytes], "recording.wav", { type: "audio/wav" });
 
     requestInfo.container = container;
@@ -175,20 +194,24 @@ async function handleAudd(request, env) {
 
   if (!response.ok) {
     console.log(`audd=upstream_http_error status=${response.status}`);
+    await storeDebugArtifacts(requestInfo, debugWavBytes, {
+      upstream_http_status: response.status,
+      matched: false,
+    });
     return await upstreamJsonError("audd_failed", response);
   }
 
   const data = await response.json();
   const result = data?.result;
-  console.log(
-    `audd=upstream_response ${JSON.stringify({
-      status: data?.status ?? "",
-      matched: Boolean(result),
-      error: data?.error ?? null,
-      title: typeof result?.title === "string" ? result.title : "",
-      artist: typeof result?.artist === "string" ? result.artist : "",
-    })}`,
-  );
+  const upstreamInfo = {
+    status: data?.status ?? "",
+    matched: Boolean(result),
+    error: data?.error ?? null,
+    title: typeof result?.title === "string" ? result.title : "",
+    artist: typeof result?.artist === "string" ? result.artist : "",
+  };
+  console.log(`audd=upstream_response ${JSON.stringify(upstreamInfo)}`);
+  await storeDebugArtifacts(requestInfo, debugWavBytes, upstreamInfo);
 
   if (!result) {
     return jsonResponse({ matched: false });
@@ -210,6 +233,46 @@ function stringField(value) {
 function integerField(value) {
   const parsed = Number.parseInt(stringField(value), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+async function getDebugAsset(cacheUrl) {
+  const response = await caches.default.match(cacheUrl);
+  if (!response) {
+    return jsonResponse({ error: "debug_asset_not_found" }, 404);
+  }
+  return response;
+}
+
+async function storeDebugArtifacts(requestInfo, wavBytes, upstreamInfo) {
+  if (!(wavBytes instanceof Uint8Array) || wavBytes.byteLength === 0) {
+    return;
+  }
+
+  const metadata = {
+    ...requestInfo,
+    upstream: upstreamInfo,
+    stored_at: new Date().toISOString(),
+  };
+
+  const wavResponse = new Response(wavBytes, {
+    headers: {
+      "content-type": "audio/wav",
+      "content-disposition": 'attachment; filename="decaflash-last.wav"',
+      "cache-control": `private, max-age=${DEBUG_CACHE_SECONDS}`,
+    },
+  });
+
+  const jsonResponseBody = new Response(JSON.stringify(metadata, null, 2), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": `private, max-age=${DEBUG_CACHE_SECONDS}`,
+    },
+  });
+
+  await Promise.all([
+    caches.default.put(DEBUG_WAV_CACHE_URL, wavResponse),
+    caches.default.put(DEBUG_JSON_CACHE_URL, jsonResponseBody),
+  ]);
 }
 
 function clamp(value, min, max) {
@@ -245,54 +308,103 @@ function summarizePcm(samples) {
   };
 }
 
+function decodeDecaflashMuLaw(bytes, sampleCount) {
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+    throw new Error("invalid_mulaw_payload");
+  }
+
+  const totalSamples = sampleCount || bytes.length;
+  const output = new Int16Array(totalSamples);
+  const limit = Math.min(bytes.length, totalSamples);
+  for (let i = 0; i < limit; i += 1) {
+    output[i] = decodeMuLawByte(bytes[i]);
+  }
+  return output;
+}
+
+function decodeMuLawByte(value) {
+  value = (~value) & 0xff;
+  const sign = value & 0x80;
+  const exponent = (value >> 4) & 0x07;
+  const mantissa = value & 0x0f;
+  let magnitude = ((mantissa << 3) + 0x84) << exponent;
+  magnitude -= 0x84;
+  return sign ? -magnitude : magnitude;
+}
+
 function decodeDecaflashImaAdpcm(bytes, sampleCount) {
   if (!(bytes instanceof Uint8Array) || bytes.length < 4) {
     throw new Error("invalid_ima_adpcm_payload");
   }
 
-  const predictor = (bytes[0] | (bytes[1] << 8));
-  let statePredictor = predictor > 0x7fff ? predictor - 0x10000 : predictor;
-  let stateIndex = clamp(bytes[2], 0, 88);
-
-  const totalSamples = sampleCount || (1 + Math.max(0, bytes.length - 4) * 2);
+  const totalSamples = sampleCount || estimateBlockDecodedSamples(bytes.length);
   const output = new Int16Array(totalSamples);
-  output[0] = statePredictor;
 
-  let outputIndex = 1;
-  for (let i = 4; i < bytes.length && outputIndex < totalSamples; i += 1) {
-    const packed = bytes[i];
-    output[outputIndex++] = decodeNibble(packed & 0x0f);
-    if (outputIndex < totalSamples) {
-      output[outputIndex++] = decodeNibble((packed >> 4) & 0x0f);
+  let readIndex = 0;
+  let outputIndex = 0;
+
+  while ((readIndex + 4) <= bytes.length && outputIndex < totalSamples) {
+    const predictor = (bytes[readIndex] | (bytes[readIndex + 1] << 8));
+    let statePredictor = predictor > 0x7fff ? predictor - 0x10000 : predictor;
+    let stateIndex = clamp(bytes[readIndex + 2], 0, 88);
+    readIndex += 4;
+
+    const blockSamples = Math.min(IMA_BLOCK_SAMPLE_COUNT, totalSamples - outputIndex);
+    output[outputIndex++] = statePredictor;
+
+    for (let blockIndex = 1; blockIndex < blockSamples; ) {
+      if (readIndex >= bytes.length) {
+        throw new Error("truncated_ima_adpcm_block");
+      }
+
+      const packed = bytes[readIndex++];
+      output[outputIndex++] = decodeNibble(packed & 0x0f);
+      blockIndex += 1;
+
+      if (blockIndex < blockSamples) {
+        output[outputIndex++] = decodeNibble((packed >> 4) & 0x0f);
+        blockIndex += 1;
+      }
+    }
+
+    function decodeNibble(nibble) {
+      const step = IMA_STEP_TABLE[stateIndex];
+      let diff = step >> 3;
+
+      if ((nibble & 4) !== 0) {
+        diff += step;
+      }
+      if ((nibble & 2) !== 0) {
+        diff += step >> 1;
+      }
+      if ((nibble & 1) !== 0) {
+        diff += step >> 2;
+      }
+
+      if ((nibble & 8) !== 0) {
+        statePredictor -= diff;
+      } else {
+        statePredictor += diff;
+      }
+
+      statePredictor = clamp(statePredictor, -32768, 32767);
+      stateIndex = clamp(stateIndex + IMA_INDEX_TABLE[nibble & 0x0f], 0, 88);
+      return statePredictor;
     }
   }
 
   return output;
+}
 
-  function decodeNibble(nibble) {
-    const step = IMA_STEP_TABLE[stateIndex];
-    let diff = step >> 3;
-
-    if ((nibble & 4) !== 0) {
-      diff += step;
-    }
-    if ((nibble & 2) !== 0) {
-      diff += step >> 1;
-    }
-    if ((nibble & 1) !== 0) {
-      diff += step >> 2;
-    }
-
-    if ((nibble & 8) !== 0) {
-      statePredictor -= diff;
-    } else {
-      statePredictor += diff;
-    }
-
-    statePredictor = clamp(statePredictor, -32768, 32767);
-    stateIndex = clamp(stateIndex + IMA_INDEX_TABLE[nibble & 0x0f], 0, 88);
-    return statePredictor;
+function estimateBlockDecodedSamples(byteLength) {
+  let totalSamples = 0;
+  let remaining = byteLength;
+  while (remaining >= 4) {
+    const encodedBytes = Math.min(128, remaining - 4);
+    totalSamples += 1 + (encodedBytes * 2);
+    remaining -= 4 + encodedBytes;
   }
+  return totalSamples;
 }
 
 function buildMono16BitWav(samples, sampleRateHz) {

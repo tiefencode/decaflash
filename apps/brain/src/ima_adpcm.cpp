@@ -49,6 +49,21 @@ size_t requiredBytesForSamples(size_t sampleCount) {
     return 0;
   }
 
+  size_t total = 0;
+  size_t remaining = sampleCount;
+  while (remaining > 0) {
+    const size_t blockSamples = (remaining < kBlockSampleCount) ? remaining : kBlockSampleCount;
+    total += requiredBytesForBlock(blockSamples);
+    remaining -= blockSamples;
+  }
+  return total;
+}
+
+size_t requiredBytesForBlock(size_t sampleCount) {
+  if (sampleCount == 0) {
+    return 0;
+  }
+
   const size_t encodedSampleCount = sampleCount - 1U;
   return kHeaderSize + ((encodedSampleCount + 1U) / 2U);
 }

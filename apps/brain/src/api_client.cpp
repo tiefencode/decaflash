@@ -698,6 +698,7 @@ bool fetchCloudGeneratedSongText(const char* title,
 
   char input[240] = {};
   snprintf(input, sizeof(input), "Titel: %s\nArtist: %s", title, artist);
+  Serial.printf("api=chattie_song_begin artist=\"%s\" title=\"%s\"\n", artist, title);
   return fetchCloudChattieText(input, kCloudChattieSongPrompt, destination, capacity);
 }
 
@@ -714,20 +715,25 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
 
   title[0] = '\0';
   artist[0] = '\0';
+  Serial.printf("api=audd_begin samples=%u rate=%lu bytes=%u format=mulaw\n",
+                static_cast<unsigned>(recording.sampleCount),
+                static_cast<unsigned long>(recording.sampleRateHz),
+                static_cast<unsigned>(recording.byteCount));
 
   char auddUrl[160] = {};
   if (!deriveCloudAuddUrl(auddUrl, sizeof(auddUrl))) {
+    Serial.println("api=audd_url_invalid");
     return false;
   }
 
-  char preamble[512] = {};
+  char preamble[640] = {};
   const int preambleLength = snprintf(
     preamble,
     sizeof(preamble),
     "--%s\r\n"
     "Content-Disposition: form-data; name=\"encoding\"\r\n"
     "\r\n"
-    "ima_adpcm\r\n"
+    "mulaw\r\n"
     "--%s\r\n"
     "Content-Disposition: form-data; name=\"sample_rate_hz\"\r\n"
     "\r\n"
@@ -739,9 +745,9 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
     "--%s\r\n"
     "Content-Disposition: form-data; name=\"container\"\r\n"
     "\r\n"
-    "decaflash_ima_adpcm\r\n"
+    "decaflash_mulaw\r\n"
     "--%s\r\n"
-    "Content-Disposition: form-data; name=\"file\"; filename=\"recording.adpcm\"\r\n"
+    "Content-Disposition: form-data; name=\"file\"; filename=\"recording.mulaw\"\r\n"
     "Content-Type: application/octet-stream\r\n"
     "\r\n",
     kCloudMultipartBoundary,
@@ -753,6 +759,9 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
     kCloudMultipartBoundary
   );
   if (preambleLength <= 0 || static_cast<size_t>(preambleLength) >= sizeof(preamble)) {
+    Serial.printf("api=audd_preamble_invalid len=%d cap=%u\n",
+                  preambleLength,
+                  static_cast<unsigned>(sizeof(preamble)));
     return false;
   }
 
@@ -764,6 +773,9 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
     kCloudMultipartBoundary
   );
   if (footerLength <= 0 || static_cast<size_t>(footerLength) >= sizeof(footer)) {
+    Serial.printf("api=audd_footer_invalid len=%d cap=%u\n",
+                  footerLength,
+                  static_cast<unsigned>(sizeof(footer)));
     return false;
   }
 
@@ -784,6 +796,7 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
   WiFiClientSecure client;
   HTTPClient http;
   char body[kCloudHttpBodyCapacity] = {};
+  Serial.printf("api=audd_post bytes=%u\n", static_cast<unsigned>(stream.totalLength()));
   if (!postCloudStream(http,
                        client,
                        auddUrl,
@@ -793,6 +806,7 @@ bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
                        stream.totalLength(),
                        body,
                        sizeof(body))) {
+    Serial.println("api=audd_post_failed");
     return false;
   }
 
@@ -865,6 +879,7 @@ void cloudWorkerTask(void* parameter) {
 
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    Serial.println("api=job_wakeup");
 
     CloudQueuedJob localJob = {};
     bool haveJob = false;
@@ -879,22 +894,30 @@ void cloudWorkerTask(void* parameter) {
     portEXIT_CRITICAL(&cloudJobMux);
 
     if (!haveJob) {
+      Serial.println("api=job_spurious_wakeup");
       continue;
     }
+
+    Serial.printf("api=job_start type=%u owner=%u\n",
+                  static_cast<unsigned>(localJob.type),
+                  static_cast<unsigned>(localJob.owner));
 
     bool processed = false;
     char displayText[kCloudTextCapacity] = {};
 
     switch (localJob.type) {
       case CloudJobType::Prompt:
+        Serial.println("api=job_prompt_begin");
         processed = fetchCloudChattieText(
           localJob.input,
           kCloudChattieMonitorPrompt,
           displayText,
           sizeof(displayText));
+        Serial.printf("api=job_prompt_done processed=%u\n", processed ? 1U : 0U);
         break;
 
       case CloudJobType::RecordedAudio: {
+        Serial.println("api=job_recording_begin");
         char title[kCloudTitleCapacity] = {};
         char artist[kCloudArtistCapacity] = {};
         if (fetchCloudSongMetadataFromRecording(
@@ -910,6 +933,7 @@ void cloudWorkerTask(void* parameter) {
             displayText,
             sizeof(displayText));
         }
+        Serial.printf("api=job_recording_done processed=%u\n", processed ? 1U : 0U);
         break;
       }
 
@@ -938,6 +962,9 @@ void cloudWorkerTask(void* parameter) {
       recordedAudioCompletionOwner = localJob.owner;
     }
     portEXIT_CRITICAL(&cloudJobMux);
+    Serial.printf("api=job_complete processed=%u canceled=%u\n",
+                  processed ? 1U : 0U,
+                  aiJobCanceled ? 1U : 0U);
   }
 }
 
@@ -1122,7 +1149,7 @@ bool queueRecordedAudioToTextDisplay(RecordedAudioClip& recording, bool aiOwned)
 
   const bool queued = queueCloudJob(job);
   if (queued) {
-    Serial.printf("api=recording_queued samples=%u rate=%lu bytes=%u format=ima_adpcm\n",
+    Serial.printf("api=recording_queued samples=%u rate=%lu bytes=%u format=mulaw\n",
                   static_cast<unsigned>(job.recording.sampleCount),
                   static_cast<unsigned long>(job.recording.sampleRateHz),
                   static_cast<unsigned>(job.recording.byteCount));

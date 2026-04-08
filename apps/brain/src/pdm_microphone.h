@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-#include "ima_adpcm.h"
+#include "mulaw.h"
 
 namespace decaflash::brain {
 
@@ -105,13 +105,8 @@ class PdmMicrophone {
   size_t recordingBufferCapacity_ = 0;
   size_t recordingTargetSampleCount_ = 0;
   size_t recordingSampleCount_ = 0;
-  size_t recordingEncodedByteCount_ = 0;
   uint32_t recordingInputSampleCount_ = 0;
   uint8_t* recordingBuffer_ = nullptr;
-  ima_adpcm::State recordingAdpcmState_ = {};
-  uint8_t recordingAdpcmPartialByte_ = 0;
-  bool recordingAdpcmHalfBytePending_ = false;
-  bool recordingAdpcmSeeded_ = false;
 };
 
 bool startMicrophoneRecording(uint32_t durationMs = 0);
