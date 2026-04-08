@@ -14,6 +14,7 @@ void service(uint32_t now, const PdmMicrophone& microphone);
 bool blocksBeatDotOverlay(uint32_t now, const PdmMicrophone& microphone);
 bool renderOverlay(uint32_t now, const PdmMicrophone& microphone);
 void handleRecordingProcessed(uint32_t now, bool processed);
+void handleWifiFailure(uint32_t now);
 bool useAiMeterTheme(const PdmMicrophone& microphone);
 bool ownsRecording();
 

@@ -30,11 +30,14 @@ static constexpr size_t kCloudTextCapacity = 96;
 static constexpr size_t kCloudTitleCapacity = 96;
 static constexpr size_t kCloudArtistCapacity = 96;
 static constexpr size_t kCloudInputCapacity = 96;
+static constexpr size_t kCloudHttpBodyCapacity = 512;
+static constexpr size_t kCloudJsonPayloadCapacity = 512;
 static constexpr uint32_t kCloudTextDisplayDelayMs = 320;
 static constexpr uint32_t kCloudWorkerStackWords = 12288;
 static constexpr BaseType_t kCloudWorkerPriority = 1;
 static constexpr uint16_t kCloudConnectTimeoutMs = 12000;
 static constexpr uint16_t kCloudRequestTimeoutMs = 30000;
+static constexpr uint16_t kCloudResponseIdleTimeoutMs = 750;
 static constexpr char kCloudChattieMonitorPrompt[] =
   "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. "
   "Nutze die Nutzereingabe als Inspiration. Keine Erklaerung. Keine Emojis. "
@@ -277,27 +280,51 @@ bool appendCharacter(char* destination, size_t capacity, size_t& length, char va
   return true;
 }
 
-void printResponseBodySnippet(const char* label, const String& body) {
-  if (label == nullptr || body.isEmpty()) {
+bool appendText(char* destination, size_t capacity, size_t& length, const char* source) {
+  if (destination == nullptr || source == nullptr || capacity == 0) {
+    return false;
+  }
+
+  while (*source != '\0') {
+    if (!appendCharacter(destination, capacity, length, *source)) {
+      return false;
+    }
+    source++;
+  }
+
+  return true;
+}
+
+void printResponseBodySnippet(const char* label, const char* body) {
+  if (label == nullptr || body == nullptr || body[0] == '\0') {
     return;
   }
 
-  String snippet = body;
-  snippet.replace('\r', ' ');
-  snippet.replace('\n', ' ');
-  if (snippet.length() > 180) {
-    snippet.remove(180);
-    snippet += "...";
+  char snippet[184] = {};
+  size_t length = 0;
+  const char* cursor = body;
+  while (*cursor != '\0' && length < (sizeof(snippet) - 4U)) {
+    char value = *cursor++;
+    if (value == '\r' || value == '\n') {
+      value = ' ';
+    }
+    snippet[length++] = value;
   }
+  if (*cursor != '\0') {
+    snippet[length++] = '.';
+    snippet[length++] = '.';
+    snippet[length++] = '.';
+  }
+  snippet[length] = '\0';
 
-  Serial.printf("api=%s_body body=\"%s\"\n", label, snippet.c_str());
+  Serial.printf("api=%s_body body=\"%s\"\n", label, snippet);
 }
 
-bool extractJsonStringField(const String& body,
+bool extractJsonStringField(const char* body,
                             const char* fieldName,
                             char* destination,
                             size_t capacity) {
-  if (capacity == 0) {
+  if (body == nullptr || fieldName == nullptr || destination == nullptr || capacity == 0) {
     return false;
   }
 
@@ -305,7 +332,7 @@ bool extractJsonStringField(const String& body,
   char fieldPattern[40] = {};
   snprintf(fieldPattern, sizeof(fieldPattern), "\"%s\"", fieldName);
 
-  const char* keyStart = strstr(body.c_str(), fieldPattern);
+  const char* keyStart = strstr(body, fieldPattern);
   if (keyStart == nullptr) {
     return false;
   }
@@ -366,11 +393,15 @@ bool extractJsonStringField(const String& body,
   return length > 0;
 }
 
-bool extractJsonBoolField(const String& body, const char* fieldName, bool& value) {
+bool extractJsonBoolField(const char* body, const char* fieldName, bool& value) {
+  if (body == nullptr || fieldName == nullptr) {
+    return false;
+  }
+
   char fieldPattern[40] = {};
   snprintf(fieldPattern, sizeof(fieldPattern), "\"%s\"", fieldName);
 
-  const char* keyStart = strstr(body.c_str(), fieldPattern);
+  const char* keyStart = strstr(body, fieldPattern);
   if (keyStart == nullptr) {
     return false;
   }
@@ -398,40 +429,107 @@ bool extractJsonBoolField(const String& body, const char* fieldName, bool& value
   return false;
 }
 
-void appendJsonEscaped(String& destination, const char* source) {
-  if (source == nullptr) {
-    return;
+bool appendJsonEscaped(char* destination, size_t capacity, size_t& length, const char* source) {
+  if (destination == nullptr || source == nullptr || capacity == 0) {
+    return false;
   }
 
   while (*source != '\0') {
     switch (*source) {
       case '\\':
-        destination += "\\\\";
+        if (!appendText(destination, capacity, length, "\\\\")) {
+          return false;
+        }
         break;
 
       case '"':
-        destination += "\\\"";
+        if (!appendText(destination, capacity, length, "\\\"")) {
+          return false;
+        }
         break;
 
       case '\n':
-        destination += "\\n";
+        if (!appendText(destination, capacity, length, "\\n")) {
+          return false;
+        }
         break;
 
       case '\r':
-        destination += "\\r";
+        if (!appendText(destination, capacity, length, "\\r")) {
+          return false;
+        }
         break;
 
       case '\t':
-        destination += "\\t";
+        if (!appendText(destination, capacity, length, "\\t")) {
+          return false;
+        }
         break;
 
       default:
-        destination += *source;
+        if (!appendCharacter(destination, capacity, length, *source)) {
+          return false;
+        }
         break;
     }
 
     source++;
   }
+
+  return true;
+}
+
+size_t readHttpResponseBody(HTTPClient& http, char* destination, size_t capacity) {
+  if (destination == nullptr || capacity == 0) {
+    return 0;
+  }
+
+  destination[0] = '\0';
+
+  WiFiClient* stream = http.getStreamPtr();
+  if (stream == nullptr) {
+    return 0;
+  }
+
+  size_t length = 0;
+  const int expectedLength = http.getSize();
+  const size_t maximumLength =
+    (expectedLength > 0 && static_cast<size_t>(expectedLength) < (capacity - 1U))
+      ? static_cast<size_t>(expectedLength)
+      : (capacity - 1U);
+  uint32_t lastProgressAt = millis();
+
+  while ((http.connected() || stream->available()) && length < maximumLength) {
+    const int availableBytes = stream->available();
+    if (availableBytes <= 0) {
+      if (expectedLength > 0 && length >= static_cast<size_t>(expectedLength)) {
+        break;
+      }
+      if ((millis() - lastProgressAt) >= kCloudResponseIdleTimeoutMs) {
+        break;
+      }
+      delay(1);
+      continue;
+    }
+
+    const size_t chunkLength = (static_cast<size_t>(availableBytes) < (maximumLength - length))
+                                 ? static_cast<size_t>(availableBytes)
+                                 : (maximumLength - length);
+    const size_t bytesRead = stream->readBytes(destination + length, chunkLength);
+    if (bytesRead == 0) {
+      if ((millis() - lastProgressAt) >= kCloudResponseIdleTimeoutMs) {
+        break;
+      }
+      delay(1);
+      continue;
+    }
+
+    length += bytesRead;
+    lastProgressAt = millis();
+  }
+
+  destination[length] = '\0';
+  return length;
 }
 
 bool beginSecureRequest(HTTPClient& http,
@@ -447,14 +545,19 @@ bool beginSecureRequest(HTTPClient& http,
 
   http.setConnectTimeout(kCloudConnectTimeoutMs);
   http.setTimeout(kCloudRequestTimeoutMs);
+  http.setReuse(false);
   http.addHeader("User-Agent", "decaflash-brain");
   http.addHeader("Accept", "application/json, text/plain");
+  http.addHeader("Connection", "close");
   return true;
 }
 
 void addCloudAuthorizationHeader(HTTPClient& http) {
-  String bearerValue = "Bearer ";
-  bearerValue += decaflash::secrets::kBrainSharedSecret;
+  char bearerValue[160] = {};
+  snprintf(bearerValue,
+           sizeof(bearerValue),
+           "Bearer %s",
+           decaflash::secrets::kBrainSharedSecret);
   http.addHeader("Authorization", bearerValue);
 }
 
@@ -523,8 +626,9 @@ bool postCloudJson(HTTPClient& http,
                    WiFiClientSecure& client,
                    const char* url,
                    const char* label,
-                   const String& payload,
-                   String& responseBody) {
+                   const char* payload,
+                   char* responseBody,
+                   size_t responseCapacity) {
   if (!beginSecureRequest(http, client, url, label)) {
     return false;
   }
@@ -541,15 +645,15 @@ bool postCloudJson(HTTPClient& http,
     return false;
   }
 
-  responseBody = http.getString();
+  const size_t responseLength = readHttpResponseBody(http, responseBody, responseCapacity);
   http.end();
 
   Serial.printf("api=%s status=%d bytes=%u\n",
                 label,
                 statusCode,
-                static_cast<unsigned>(responseBody.length()));
+                static_cast<unsigned>(responseLength));
 
-  if (statusCode != HTTP_CODE_OK || responseBody.isEmpty()) {
+  if (statusCode != HTTP_CODE_OK || responseLength == 0) {
     printResponseBodySnippet(label, responseBody);
     Serial.printf("api=%s_empty\n", label);
     return false;
@@ -565,7 +669,8 @@ bool postCloudStream(HTTPClient& http,
                      const char* contentType,
                      Stream& stream,
                      size_t contentLength,
-                     String& responseBody) {
+                     char* responseBody,
+                     size_t responseCapacity) {
   if (!beginSecureRequest(http, client, url, label)) {
     return false;
   }
@@ -582,15 +687,15 @@ bool postCloudStream(HTTPClient& http,
     return false;
   }
 
-  responseBody = http.getString();
+  const size_t responseLength = readHttpResponseBody(http, responseBody, responseCapacity);
   http.end();
 
   Serial.printf("api=%s status=%d bytes=%u\n",
                 label,
                 statusCode,
-                static_cast<unsigned>(responseBody.length()));
+                static_cast<unsigned>(responseLength));
 
-  if (statusCode != HTTP_CODE_OK || responseBody.isEmpty()) {
+  if (statusCode != HTTP_CODE_OK || responseLength == 0) {
     printResponseBodySnippet(label, responseBody);
     Serial.printf("api=%s_empty\n", label);
     return false;
@@ -607,12 +712,9 @@ bool fetchCloudGeneratedSongText(const char* title,
     return false;
   }
 
-  String input = "Titel: ";
-  input += title;
-  input += "\nArtist: ";
-  input += artist;
-
-  return fetchCloudChattieText(input.c_str(), kCloudChattieSongPrompt, destination, capacity);
+  char input[240] = {};
+  snprintf(input, sizeof(input), "Titel: %s\nArtist: %s", title, artist);
+  return fetchCloudChattieText(input, kCloudChattieSongPrompt, destination, capacity);
 }
 
 bool fetchCloudSongMetadataFromRecording(const int16_t* samples,
@@ -674,20 +776,24 @@ bool fetchCloudSongMetadataFromRecording(const int16_t* samples,
     static_cast<size_t>(footerLength)
   );
 
-  String contentType = "multipart/form-data; boundary=";
-  contentType += kCloudMultipartBoundary;
+  char contentType[96] = {};
+  snprintf(contentType,
+           sizeof(contentType),
+           "multipart/form-data; boundary=%s",
+           kCloudMultipartBoundary);
 
   WiFiClientSecure client;
   HTTPClient http;
-  String body;
+  char body[kCloudHttpBodyCapacity] = {};
   if (!postCloudStream(http,
                        client,
                        auddUrl,
                        "audd",
-                       contentType.c_str(),
+                       contentType,
                        stream,
                        stream.totalLength(),
-                       body)) {
+                       body,
+                       sizeof(body))) {
     return false;
   }
 
@@ -722,16 +828,27 @@ bool fetchCloudChattieText(const char* input,
 
   destination[0] = '\0';
 
-  String payload = "{\"instructions\":\"";
-  appendJsonEscaped(payload, instructions);
-  payload += "\",\"input\":\"";
-  appendJsonEscaped(payload, input);
-  payload += "\"}";
+  char payload[kCloudJsonPayloadCapacity] = {};
+  size_t payloadLength = 0;
+  if (!appendText(payload, sizeof(payload), payloadLength, "{\"instructions\":\"") ||
+      !appendJsonEscaped(payload, sizeof(payload), payloadLength, instructions) ||
+      !appendText(payload, sizeof(payload), payloadLength, "\",\"input\":\"") ||
+      !appendJsonEscaped(payload, sizeof(payload), payloadLength, input) ||
+      !appendText(payload, sizeof(payload), payloadLength, "\"}")) {
+    Serial.println("api=chattie_payload_too_large");
+    return false;
+  }
 
   WiFiClientSecure client;
   HTTPClient http;
-  String body;
-  if (!postCloudJson(http, client, decaflash::secrets::kCloudChattieUrl, "chattie", payload, body)) {
+  char body[kCloudHttpBodyCapacity] = {};
+  if (!postCloudJson(http,
+                     client,
+                     decaflash::secrets::kCloudChattieUrl,
+                     "chattie",
+                     payload,
+                     body,
+                     sizeof(body))) {
     return false;
   }
 
@@ -789,6 +906,8 @@ void cloudWorkerTask(void* parameter) {
               sizeof(title),
               artist,
               sizeof(artist))) {
+          free(localJob.samples);
+          localJob.samples = nullptr;
           processed = fetchCloudGeneratedSongText(
             title,
             artist,

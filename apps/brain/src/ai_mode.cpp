@@ -13,12 +13,14 @@ namespace decaflash::brain::ai_mode {
 namespace {
 
 static constexpr uint32_t kTogglePressMs = 1200;
-static constexpr uint32_t kWifiRetryMs = 5000;
 static constexpr uint32_t kWifiConnectedDisplayMs = 1000;
 static constexpr uint32_t kWifiFailedDisplayMs = 1500;
 static constexpr uint32_t kToggleDisplayMs = 780;
 static constexpr uint32_t kMusicStableMs = 1500;
-static constexpr uint32_t kFailureCooldownMs = 180000;
+static constexpr uint32_t kRecognitionFallbackMs = 1200;
+static constexpr uint32_t kRecognitionRecentOnsetMs = 180;
+static constexpr uint8_t kRecognitionMinBeatConfidence = 18;
+static constexpr uint32_t kFailureCooldownMs = 30000;
 static constexpr uint32_t kSuccessCooldownMs = 600000;
 static constexpr uint32_t kRecordDurationMs = 3000;
 
@@ -36,12 +38,14 @@ uint32_t aiNextWifiRetryAtMs = 0;
 uint32_t aiReadyToListenAtMs = 0;
 uint32_t aiCooldownUntilMs = 0;
 uint32_t aiMusicPresentSinceAtMs = 0;
+uint32_t aiRecognitionArmedAtMs = 0;
 TransientIcon transientIcon = TransientIcon::None;
 uint32_t transientIconColor = 0;
 uint32_t transientIconUntilMs = 0;
 
 void resetListeningWindow() {
   aiMusicPresentSinceAtMs = 0;
+  aiRecognitionArmedAtMs = 0;
 }
 
 void showTransientIcon(TransientIcon icon, uint32_t color, uint32_t durationMs) {
@@ -100,6 +104,19 @@ void setCooldown(uint32_t now, uint32_t durationMs, const char* reason) {
   Serial.printf("ai=cooldown reason=%s ms=%lu\n",
                 reason,
                 static_cast<unsigned long>(durationMs));
+}
+
+void disableForWifiFailure(uint32_t now, const char* reason) {
+  (void)now;
+  aiModeEnabled = false;
+  decaflash::brain::api_client::cancelAiWork();
+  aiRecordingOwned = false;
+  aiNextWifiRetryAtMs = 0;
+  aiReadyToListenAtMs = 0;
+  aiCooldownUntilMs = 0;
+  resetListeningWindow();
+  showTransientIcon(TransientIcon::WifiFailed, 0xFF0000, kWifiFailedDisplayMs);
+  Serial.printf("ai=disabled reason=%s\n", reason);
 }
 
 }  // namespace
@@ -173,12 +190,7 @@ void service(uint32_t now, const PdmMicrophone& microphone) {
       Serial.printf("ai=wifi_connected wait_ms=%lu\n",
                     static_cast<unsigned long>(kWifiConnectedDisplayMs));
     } else {
-      showTransientIcon(TransientIcon::WifiFailed, 0xFF0000, kWifiFailedDisplayMs);
-      aiNextWifiRetryAtMs = finishedAtMs + kWifiRetryMs;
-      aiReadyToListenAtMs = 0;
-      resetListeningWindow();
-      Serial.printf("ai=wifi_retry in_ms=%lu\n",
-                    static_cast<unsigned long>(kWifiRetryMs));
+      disableForWifiFailure(finishedAtMs, "wifi_connect_failed");
     }
     return;
   }
@@ -205,6 +217,25 @@ void service(uint32_t now, const PdmMicrophone& microphone) {
     return;
   }
 
+  if (aiRecognitionArmedAtMs == 0) {
+    aiRecognitionArmedAtMs = now;
+  }
+
+  const bool beatReady =
+    microphone.detectedBpm() != 0 &&
+    microphone.beatConfidence() >= kRecognitionMinBeatConfidence;
+  const uint32_t onsetAtMs = microphone.lastOnsetAtMs();
+  const bool recentOnset =
+    onsetAtMs != 0 &&
+    (now >= onsetAtMs) &&
+    ((now - onsetAtMs) <= kRecognitionRecentOnsetMs);
+  const bool fallbackReady =
+    (now - aiRecognitionArmedAtMs) >= kRecognitionFallbackMs;
+
+  if (!fallbackReady && (!beatReady || !recentOnset)) {
+    return;
+  }
+
   if (!decaflash::brain::startMicrophoneRecording(kRecordDurationMs)) {
     setCooldown(now, kFailureCooldownMs, "record_start_failed");
     return;
@@ -212,8 +243,11 @@ void service(uint32_t now, const PdmMicrophone& microphone) {
 
   aiRecordingOwned = true;
   resetListeningWindow();
-  Serial.printf("ai=record duration_ms=%lu\n",
-                static_cast<unsigned long>(kRecordDurationMs));
+  Serial.printf("ai=record duration_ms=%lu trigger=%s bpm=%u conf=%u\n",
+                static_cast<unsigned long>(kRecordDurationMs),
+                fallbackReady ? "fallback" : "beat",
+                static_cast<unsigned>(microphone.detectedBpm()),
+                static_cast<unsigned>(microphone.beatConfidence()));
 }
 
 bool blocksBeatDotOverlay(uint32_t now, const PdmMicrophone& microphone) {
@@ -246,6 +280,14 @@ void handleRecordingProcessed(uint32_t now, bool processed) {
   setCooldown(now,
               processed ? kSuccessCooldownMs : kFailureCooldownMs,
               processed ? "song_displayed" : "no_match_or_error");
+}
+
+void handleWifiFailure(uint32_t now) {
+  if (!aiModeEnabled) {
+    return;
+  }
+
+  disableForWifiFailure(now, "wifi_unavailable");
 }
 
 bool useAiMeterTheme(const PdmMicrophone& microphone) {

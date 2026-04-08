@@ -12,6 +12,7 @@
 #include "ai_mode.h"
 #include "api_client.h"
 #include "text_playback.h"
+#include "wifi_manager.h"
 
 using decaflash::DeviceType;
 using decaflash::NodeEffect;
@@ -848,7 +849,12 @@ void loop() {
         decaflash::brain::ai_mode::ownsRecording());
     if (!queued) {
       Serial.println("record=process_queue_failed");
-      decaflash::brain::ai_mode::handleRecordingProcessed(now, false);
+      if (!decaflash::brain::wifi_manager::isConnected() &&
+          decaflash::brain::ai_mode::ownsRecording()) {
+        decaflash::brain::ai_mode::handleWifiFailure(now);
+      } else {
+        decaflash::brain::ai_mode::handleRecordingProcessed(now, false);
+      }
     }
   }
   bool audioProcessingSucceeded = false;

@@ -35,10 +35,23 @@ static constexpr uint8_t kDigitMasks[][5] = {
 static constexpr Glyph kTextGlyphs[] = {
   {' ', {0b00000, 0b00000, 0b00000, 0b00000, 0b00000}},
   {'!', {0b00100, 0b00100, 0b00100, 0b00000, 0b00100}},
+  {'"', {0b01010, 0b01010, 0b00000, 0b00000, 0b00000}},
+  {'#', {0b01010, 0b11111, 0b01010, 0b11111, 0b01010}},
+  {'&', {0b01100, 0b10010, 0b01100, 0b10010, 0b01101}},
+  {'\'', {0b00100, 0b00100, 0b00000, 0b00000, 0b00000}},
+  {'(', {0b00010, 0b00100, 0b00100, 0b00100, 0b00010}},
+  {')', {0b01000, 0b00100, 0b00100, 0b00100, 0b01000}},
+  {'*', {0b00100, 0b10101, 0b01110, 0b10101, 0b00100}},
+  {'+', {0b00000, 0b00100, 0b11111, 0b00100, 0b00000}},
   {'-', {0b00000, 0b00000, 0b11111, 0b00000, 0b00000}},
   {',', {0b00000, 0b00000, 0b00000, 0b00110, 0b00100}},
   {'.', {0b00000, 0b00000, 0b00000, 0b00110, 0b00110}},
+  {'/', {0b00001, 0b00010, 0b00100, 0b01000, 0b10000}},
+  {':', {0b00000, 0b00110, 0b00000, 0b00110, 0b00000}},
+  {';', {0b00000, 0b00110, 0b00000, 0b00110, 0b00100}},
+  {'=', {0b00000, 0b11111, 0b00000, 0b11111, 0b00000}},
   {'?', {0b01110, 0b00001, 0b00110, 0b00000, 0b00100}},
+  {'_', {0b00000, 0b00000, 0b00000, 0b00000, 0b11111}},
   {'0', {0b01110, 0b10011, 0b10101, 0b11001, 0b01110}},
   {'1', {0b00100, 0b01100, 0b00100, 0b00100, 0b01110}},
   {'2', {0b01110, 0b00001, 0b00110, 0b01000, 0b11111}},
@@ -198,6 +211,56 @@ const Glyph* glyphForCharacter(uint8_t character) {
   return nullptr;
 }
 
+uint8_t glyphColumnMask(const Glyph& glyph, uint8_t glyphColumn) {
+  if (glyphColumn >= kMatrixWidth) {
+    return 0;
+  }
+
+  uint8_t mask = 0;
+  for (uint8_t row = 0; row < kMatrixHeight; ++row) {
+    if (((glyph.rows[row] >> (4U - glyphColumn)) & 0x01U) != 0) {
+      mask |= static_cast<uint8_t>(1U << row);
+    }
+  }
+
+  return mask;
+}
+
+uint8_t glyphTrimmedStartColumn(const Glyph& glyph) {
+  for (uint8_t column = 0; column < kMatrixWidth; ++column) {
+    if (glyphColumnMask(glyph, column) != 0) {
+      return column;
+    }
+  }
+
+  return 0;
+}
+
+uint8_t glyphTrimmedEndColumn(const Glyph& glyph) {
+  for (int8_t column = static_cast<int8_t>(kMatrixWidth - 1U); column >= 0; --column) {
+    if (glyphColumnMask(glyph, static_cast<uint8_t>(column)) != 0) {
+      return static_cast<uint8_t>(column);
+    }
+  }
+
+  return 0;
+}
+
+uint8_t glyphColumnCount(const Glyph& glyph) {
+  const uint8_t start = glyphTrimmedStartColumn(glyph);
+  const uint8_t end = glyphTrimmedEndColumn(glyph);
+
+  if (glyphColumnMask(glyph, start) == 0 && glyphColumnMask(glyph, end) == 0) {
+    return 2;
+  }
+
+  return static_cast<uint8_t>((end - start) + 1U);
+}
+
+uint8_t glyphSpacingColumns(uint8_t character) {
+  return (character == ' ') ? 2U : 1U;
+}
+
 void drawMask(const uint8_t rows[5], uint32_t colorValue) {
   for (uint8_t y = 0; y < 5; ++y) {
     for (uint8_t x = 0; x < 5; ++x) {
@@ -332,8 +395,31 @@ void drawBeatDotOverlay(uint8_t beatDotBeat, uint32_t beatDotColorOverride) {
   M5.dis.drawpix(kBeatDotPixelIndex, beatDotColor(beatDotBeat, beatDotColorOverride));
 }
 
+size_t measureTextColumns(const uint8_t* text, size_t length) {
+  if (text == nullptr || length == 0) {
+    return 0;
+  }
+
+  size_t totalColumns = 0;
+  for (size_t index = 0; index < length; ++index) {
+    const Glyph* glyph = glyphForCharacter(text[index]);
+    if (glyph == nullptr) {
+      continue;
+    }
+
+    totalColumns += glyphColumnCount(*glyph);
+    if ((index + 1U) < length) {
+      totalColumns += glyphSpacingColumns(text[index]);
+    }
+  }
+
+  return totalColumns;
+}
+
 void drawTextCharacter(uint8_t character, uint32_t colorValue) {
   clearFrameBuffer();
+
+  colorValue = scaleColor(colorValue, 204);
 
   const Glyph* glyph = glyphForCharacter(character);
   if (glyph == nullptr) {
@@ -341,10 +427,78 @@ void drawTextCharacter(uint8_t character, uint32_t colorValue) {
     return;
   }
 
+  const uint8_t startColumn = glyphTrimmedStartColumn(*glyph);
+  const uint8_t width = glyphColumnCount(*glyph);
+  const uint8_t xOffset = (width < kMatrixWidth)
+    ? static_cast<uint8_t>((kMatrixWidth - width) / 2U)
+    : 0;
+
   for (uint8_t y = 0; y < 5; ++y) {
-    for (uint8_t x = 0; x < 5; ++x) {
-      const bool on = (glyph->rows[y] >> (4 - x)) & 0x01;
-      setFramePixel(static_cast<uint8_t>(y * 5 + x), on ? colorValue : 0x000000);
+    for (uint8_t glyphColumn = 0; glyphColumn < width; ++glyphColumn) {
+      const uint8_t sourceColumn = static_cast<uint8_t>(startColumn + glyphColumn);
+      const bool on = (glyph->rows[y] >> (4U - sourceColumn)) & 0x01U;
+      if (!on) {
+        continue;
+      }
+
+      const uint8_t x = static_cast<uint8_t>(xOffset + glyphColumn);
+      setFramePixel(static_cast<uint8_t>(y * 5U + x), colorValue);
+    }
+  }
+
+  flushFrameBuffer();
+}
+
+void drawTextWindow(const uint8_t* text,
+                    size_t length,
+                    int16_t startColumn,
+                    uint32_t colorValue) {
+  clearFrameBuffer();
+
+  colorValue = scaleColor(colorValue, 204);
+
+  if (text == nullptr || length == 0) {
+    flushFrameBuffer();
+    return;
+  }
+
+  for (uint8_t screenColumn = 0; screenColumn < kMatrixWidth; ++screenColumn) {
+    const int16_t textColumn = static_cast<int16_t>(startColumn + screenColumn);
+    if (textColumn < 0) {
+      continue;
+    }
+
+    int16_t remainingColumns = textColumn;
+    for (size_t index = 0; index < length; ++index) {
+      const uint8_t character = text[index];
+      const Glyph* glyph = glyphForCharacter(character);
+      if (glyph == nullptr) {
+        continue;
+      }
+
+      const uint8_t glyphWidth = glyphColumnCount(*glyph);
+      if (remainingColumns < glyphWidth) {
+        const uint8_t sourceColumn = static_cast<uint8_t>(
+          glyphTrimmedStartColumn(*glyph) + remainingColumns);
+        const uint8_t columnMask = glyphColumnMask(*glyph, sourceColumn);
+        for (uint8_t row = 0; row < kMatrixHeight; ++row) {
+          if (((columnMask >> row) & 0x01U) == 0) {
+            continue;
+          }
+
+          setFramePixel(static_cast<uint8_t>(row * 5U + screenColumn), colorValue);
+        }
+        break;
+      }
+
+      remainingColumns -= glyphWidth;
+      const uint8_t spacing = ((index + 1U) < length)
+        ? glyphSpacingColumns(character)
+        : 0;
+      if (remainingColumns < spacing) {
+        break;
+      }
+      remainingColumns -= spacing;
     }
   }
 

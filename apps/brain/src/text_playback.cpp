@@ -11,9 +11,8 @@ namespace decaflash::brain::text_playback {
 namespace {
 
 static constexpr size_t kTextBufferCapacity = 96;
-static constexpr uint32_t kCharacterDisplayMs = 520;
-static constexpr uint32_t kSpaceDisplayMs = 220;
-static constexpr uint32_t kCharacterGapMs = 90;
+static constexpr int16_t kTextLeadingColumns = 5;
+static constexpr uint32_t kScrollStepMs = 130;
 static constexpr uint8_t kGlyphUmlautA = 0x80;
 static constexpr uint8_t kGlyphUmlautO = 0x81;
 static constexpr uint8_t kGlyphUmlautU = 0x82;
@@ -21,9 +20,9 @@ static constexpr uint8_t kGlyphSharpS = 0x83;
 
 uint8_t textPlaybackBuffer[kTextBufferCapacity] = {};
 size_t textPlaybackLength = 0;
-size_t textPlaybackIndex = 0;
+size_t textPlaybackColumns = 0;
+int16_t textPlaybackColumn = 0;
 bool textPlaybackActive = false;
-bool textPlaybackCharacterVisible = false;
 uint32_t nextTextPlaybackAtMs = 0;
 
 bool appendPlaybackCharacter(size_t& length, uint8_t character) {
@@ -88,9 +87,9 @@ bool appendUtf8NormalizedCharacter(const char*& cursor, size_t& length) {
 
 void clearTextPlayback() {
   textPlaybackActive = false;
-  textPlaybackCharacterVisible = false;
-  textPlaybackIndex = 0;
   textPlaybackLength = 0;
+  textPlaybackColumns = 0;
+  textPlaybackColumn = 0;
   nextTextPlaybackAtMs = 0;
   textPlaybackBuffer[0] = '\0';
   decaflash::brain::matrix::clearAllPixels();
@@ -102,10 +101,6 @@ void stopTextPlayback(bool announce = true) {
   if (announce) {
     Serial.println("text=clear");
   }
-}
-
-uint32_t textDisplayDurationMs(char character) {
-  return (character == ' ') ? kSpaceDisplayMs : kCharacterDisplayMs;
 }
 
 void startTextPlayback(const char* rawText, uint32_t delayMs) {
@@ -127,17 +122,20 @@ void startTextPlayback(const char* rawText, uint32_t delayMs) {
   }
 
   textPlaybackLength = length;
-  textPlaybackIndex = 0;
-  textPlaybackCharacterVisible = false;
+  textPlaybackColumns =
+    decaflash::brain::matrix::measureTextColumns(textPlaybackBuffer, textPlaybackLength);
+  textPlaybackColumn = -kTextLeadingColumns;
   nextTextPlaybackAtMs = millis() + delayMs;
-  textPlaybackActive = length > 0;
+  textPlaybackActive = (length > 0) && (textPlaybackColumns > 0);
 
   if (!textPlaybackActive) {
     stopTextPlayback();
     return;
   }
 
-  Serial.printf("text=start len=%u\n", static_cast<unsigned>(textPlaybackLength));
+  Serial.printf("text=start len=%u cols=%u\n",
+                static_cast<unsigned>(textPlaybackLength),
+                static_cast<unsigned>(textPlaybackColumns));
 }
 
 }  // namespace
@@ -168,25 +166,18 @@ bool serviceMatrix(uint32_t now) {
     return true;
   }
 
-  if (!textPlaybackCharacterVisible) {
-    const uint8_t character = textPlaybackBuffer[textPlaybackIndex];
-    decaflash::brain::matrix::drawTextCharacter(character);
-    textPlaybackCharacterVisible = true;
-    nextTextPlaybackAtMs = now + textDisplayDurationMs(character);
-    return true;
-  }
-
-  decaflash::brain::matrix::clearAllPixels();
-  textPlaybackCharacterVisible = false;
-  textPlaybackIndex++;
-
-  if (textPlaybackIndex >= textPlaybackLength) {
+  if (textPlaybackColumn >= static_cast<int16_t>(textPlaybackColumns)) {
     clearTextPlayback();
     Serial.println("text=done");
     return true;
   }
 
-  nextTextPlaybackAtMs = now + kCharacterGapMs;
+  decaflash::brain::matrix::drawTextWindow(
+    textPlaybackBuffer,
+    textPlaybackLength,
+    textPlaybackColumn);
+  textPlaybackColumn++;
+  nextTextPlaybackAtMs = now + kScrollStepMs;
   return true;
 }
 
