@@ -6,3 +6,6 @@
 AGENTS.md
 include/wifi_credentials.h
 include/cloud_config.h
+workers/decaflash/node_modules/
+workers/decaflash/.wrangler/
+workers/decaflash/.dev.vars

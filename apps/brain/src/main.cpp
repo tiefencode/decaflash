@@ -834,18 +834,11 @@ void loop() {
   decaflash::brain::api_client::service(now);
   handleButtonInput(now);
   if (microphone.recordingReady()) {
-    int16_t* recordedSamples = nullptr;
-    size_t recordedSampleCount = 0;
-    uint32_t recordingSampleRateHz = 0;
-    const bool tookRecording = microphone.takeRecording(
-      recordedSamples,
-      recordedSampleCount,
-      recordingSampleRateHz);
+    decaflash::brain::RecordedAudioClip recording = {};
+    const bool tookRecording = microphone.takeRecording(recording);
     const bool queued = tookRecording &&
       decaflash::brain::api_client::queueRecordedAudioToTextDisplay(
-        recordedSamples,
-        recordedSampleCount,
-        recordingSampleRateHz,
+        recording,
         decaflash::brain::ai_mode::ownsRecording());
     if (!queued) {
       Serial.println("record=process_queue_failed");

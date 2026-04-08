@@ -2,7 +2,18 @@
 
 #include <Arduino.h>
 
+#include "ima_adpcm.h"
+
 namespace decaflash::brain {
+
+struct RecordedAudioClip {
+  uint8_t* data = nullptr;
+  size_t byteCount = 0;
+  size_t sampleCount = 0;
+  uint32_t sampleRateHz = 0;
+};
+
+void releaseRecordedAudioClip(RecordedAudioClip& clip);
 
 class PdmMicrophone {
  public:
@@ -14,8 +25,8 @@ class PdmMicrophone {
   bool recordingReady() const;
   uint32_t recordingSampleRateHz() const;
   size_t recordedSampleCount() const;
-  const int16_t* recordedSamples() const;
-  bool takeRecording(int16_t*& samples, size_t& sampleCount, uint32_t& sampleRateHz);
+  size_t recordedByteCount() const;
+  bool takeRecording(RecordedAudioClip& clip);
   bool cancelRecording();
   void clearRecording();
   uint8_t meterLevel() const;
@@ -27,6 +38,8 @@ class PdmMicrophone {
 
  private:
   bool ensureRecordingBufferCapacity(size_t sampleCapacity);
+  void resetRecordingEncoding();
+  bool appendRecordingSample(int16_t sample);
   void beginRequestedRecording(uint32_t now);
   void finishRecording(uint32_t now);
   void resetWindowStats();
@@ -92,8 +105,13 @@ class PdmMicrophone {
   size_t recordingBufferCapacity_ = 0;
   size_t recordingTargetSampleCount_ = 0;
   size_t recordingSampleCount_ = 0;
+  size_t recordingEncodedByteCount_ = 0;
   uint32_t recordingInputSampleCount_ = 0;
-  int16_t* recordingBuffer_ = nullptr;
+  uint8_t* recordingBuffer_ = nullptr;
+  ima_adpcm::State recordingAdpcmState_ = {};
+  uint8_t recordingAdpcmPartialByte_ = 0;
+  bool recordingAdpcmHalfBytePending_ = false;
+  bool recordingAdpcmSeeded_ = false;
 };
 
 bool startMicrophoneRecording(uint32_t durationMs = 0);

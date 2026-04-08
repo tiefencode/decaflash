@@ -16,7 +16,7 @@ namespace decaflash::brain::shell {
 namespace {
 
 static constexpr size_t kSerialCommandCapacity = 96;
-static constexpr uint32_t kDefaultRecordDurationMs = 3000;
+static constexpr uint32_t kDefaultRecordDurationMs = 12000;
 
 char serialCommandBuffer[kSerialCommandCapacity] = {};
 size_t serialCommandLength = 0;

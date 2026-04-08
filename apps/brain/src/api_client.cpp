@@ -64,30 +64,23 @@ struct CloudQueuedJob {
   CloudJobOwner owner = CloudJobOwner::Manual;
   uint32_t aiGeneration = 0;
   char input[kCloudInputCapacity] = {};
-  int16_t* samples = nullptr;
-  size_t sampleCount = 0;
-  uint32_t sampleRateHz = 0;
+  RecordedAudioClip recording = {};
 };
 
-class MultipartWavStream final : public Stream {
+class MultipartClipStream final : public Stream {
  public:
-  MultipartWavStream(const char* preamble,
-                     size_t preambleLength,
-                     const uint8_t* wavHeader,
-                     size_t wavHeaderLength,
-                     const int16_t* samples,
-                     size_t sampleCount,
-                     const char* footer,
-                     size_t footerLength)
+  MultipartClipStream(const char* preamble,
+                      size_t preambleLength,
+                      const RecordedAudioClip& recording,
+                      const char* footer,
+                      size_t footerLength)
     : preamble_(reinterpret_cast<const uint8_t*>(preamble)),
       preambleLength_(preambleLength),
-      wavHeader_(wavHeader),
-      wavHeaderLength_(wavHeaderLength),
-      pcmData_(reinterpret_cast<const uint8_t*>(samples)),
-      pcmDataLength_(sampleCount * sizeof(int16_t)),
+      clipData_(recording.data),
+      clipDataLength_(recording.byteCount),
       footer_(reinterpret_cast<const uint8_t*>(footer)),
       footerLength_(footerLength),
-      totalLength_(preambleLength_ + wavHeaderLength_ + pcmDataLength_ + footerLength_) {
+      totalLength_(preambleLength_ + clipDataLength_ + footerLength_) {
   }
 
   int available() override {
@@ -126,7 +119,11 @@ class MultipartWavStream final : public Stream {
     size_t copied = 0;
     while (copied < length && position_ < totalLength_) {
       const Section section = activeSection();
-      if (section.length == 0 || section.data == nullptr) {
+      if (section.length == 0) {
+        break;
+      }
+
+      if (section.data == nullptr) {
         break;
       }
 
@@ -156,12 +153,8 @@ class MultipartWavStream final : public Stream {
   };
 
   int byteAt(size_t absoluteOffset) const {
-    const Section section = sectionForOffset(absoluteOffset);
-    if (section.data == nullptr || section.length == 0) {
-      return -1;
-    }
-
-    return section.data[absoluteOffset - section.startOffset];
+    (void)absoluteOffset;
+    return -1;
   }
 
   Section activeSection() const {
@@ -173,17 +166,12 @@ class MultipartWavStream final : public Stream {
       return {preamble_, 0, preambleLength_};
     }
 
-    const size_t wavOffset = preambleLength_;
-    if (absoluteOffset < (wavOffset + wavHeaderLength_)) {
-      return {wavHeader_, wavOffset, wavHeaderLength_};
+    const size_t clipOffset = preambleLength_;
+    if (absoluteOffset < (clipOffset + clipDataLength_)) {
+      return {clipData_, clipOffset, clipDataLength_};
     }
 
-    const size_t pcmOffset = wavOffset + wavHeaderLength_;
-    if (absoluteOffset < (pcmOffset + pcmDataLength_)) {
-      return {pcmData_, pcmOffset, pcmDataLength_};
-    }
-
-    const size_t footerOffset = pcmOffset + pcmDataLength_;
+    const size_t footerOffset = clipOffset + clipDataLength_;
     if (absoluteOffset < (footerOffset + footerLength_)) {
       return {footer_, footerOffset, footerLength_};
     }
@@ -193,10 +181,8 @@ class MultipartWavStream final : public Stream {
 
   const uint8_t* preamble_;
   size_t preambleLength_;
-  const uint8_t* wavHeader_;
-  size_t wavHeaderLength_;
-  const uint8_t* pcmData_;
-  size_t pcmDataLength_;
+  const uint8_t* clipData_;
+  size_t clipDataLength_;
   const uint8_t* footer_;
   size_t footerLength_;
   size_t totalLength_;
@@ -228,9 +214,7 @@ void clearQueuedJobLocked() {
   queuedCloudJob.owner = CloudJobOwner::Manual;
   queuedCloudJob.aiGeneration = 0;
   queuedCloudJob.input[0] = '\0';
-  queuedCloudJob.samples = nullptr;
-  queuedCloudJob.sampleCount = 0;
-  queuedCloudJob.sampleRateHz = 0;
+  queuedCloudJob.recording = {};
 }
 
 bool cloudConfigured() {
@@ -717,14 +701,13 @@ bool fetchCloudGeneratedSongText(const char* title,
   return fetchCloudChattieText(input, kCloudChattieSongPrompt, destination, capacity);
 }
 
-bool fetchCloudSongMetadataFromRecording(const int16_t* samples,
-                                         size_t sampleCount,
-                                         uint32_t sampleRateHz,
+bool fetchCloudSongMetadataFromRecording(const RecordedAudioClip& recording,
                                          char* title,
                                          size_t titleCapacity,
                                          char* artist,
                                          size_t artistCapacity) {
-  if (samples == nullptr || sampleCount == 0 || sampleRateHz == 0 ||
+  if (recording.data == nullptr || recording.byteCount == 0 ||
+      recording.sampleCount == 0 || recording.sampleRateHz == 0 ||
       titleCapacity == 0 || artistCapacity == 0) {
     return false;
   }
@@ -737,14 +720,36 @@ bool fetchCloudSongMetadataFromRecording(const int16_t* samples,
     return false;
   }
 
-  char preamble[192] = {};
+  char preamble[512] = {};
   const int preambleLength = snprintf(
     preamble,
     sizeof(preamble),
     "--%s\r\n"
-    "Content-Disposition: form-data; name=\"file\"; filename=\"recording.wav\"\r\n"
-    "Content-Type: audio/wav\r\n"
+    "Content-Disposition: form-data; name=\"encoding\"\r\n"
+    "\r\n"
+    "ima_adpcm\r\n"
+    "--%s\r\n"
+    "Content-Disposition: form-data; name=\"sample_rate_hz\"\r\n"
+    "\r\n"
+    "%lu\r\n"
+    "--%s\r\n"
+    "Content-Disposition: form-data; name=\"sample_count\"\r\n"
+    "\r\n"
+    "%u\r\n"
+    "--%s\r\n"
+    "Content-Disposition: form-data; name=\"container\"\r\n"
+    "\r\n"
+    "decaflash_ima_adpcm\r\n"
+    "--%s\r\n"
+    "Content-Disposition: form-data; name=\"file\"; filename=\"recording.adpcm\"\r\n"
+    "Content-Type: application/octet-stream\r\n"
     "\r\n",
+    kCloudMultipartBoundary,
+    kCloudMultipartBoundary,
+    static_cast<unsigned long>(recording.sampleRateHz),
+    kCloudMultipartBoundary,
+    static_cast<unsigned>(recording.sampleCount),
+    kCloudMultipartBoundary,
     kCloudMultipartBoundary
   );
   if (preambleLength <= 0 || static_cast<size_t>(preambleLength) >= sizeof(preamble)) {
@@ -762,16 +767,10 @@ bool fetchCloudSongMetadataFromRecording(const int16_t* samples,
     return false;
   }
 
-  uint8_t wavHeader[44] = {};
-  buildWavHeader(wavHeader, sampleCount, sampleRateHz, 1, 16);
-
-  MultipartWavStream stream(
+  MultipartClipStream stream(
     preamble,
     static_cast<size_t>(preambleLength),
-    wavHeader,
-    sizeof(wavHeader),
-    samples,
-    sampleCount,
+    recording,
     footer,
     static_cast<size_t>(footerLength)
   );
@@ -899,15 +898,12 @@ void cloudWorkerTask(void* parameter) {
         char title[kCloudTitleCapacity] = {};
         char artist[kCloudArtistCapacity] = {};
         if (fetchCloudSongMetadataFromRecording(
-              localJob.samples,
-              localJob.sampleCount,
-              localJob.sampleRateHz,
+              localJob.recording,
               title,
               sizeof(title),
               artist,
               sizeof(artist))) {
-          free(localJob.samples);
-          localJob.samples = nullptr;
+          releaseRecordedAudioClip(localJob.recording);
           processed = fetchCloudGeneratedSongText(
             title,
             artist,
@@ -922,7 +918,7 @@ void cloudWorkerTask(void* parameter) {
         break;
     }
 
-    free(localJob.samples);
+    releaseRecordedAudioClip(localJob.recording);
 
     const bool aiJobCanceled =
       (localJob.owner == CloudJobOwner::Ai) &&
@@ -972,13 +968,13 @@ bool ensureCloudWorkerReady() {
 
 bool queueCloudJob(CloudQueuedJob& job) {
   if (!ensureCloudWorkerReady()) {
-    free(job.samples);
+    releaseRecordedAudioClip(job.recording);
     return false;
   }
 
   if (decaflash::brain::text_playback::isActive()) {
     Serial.println("api=busy reason=text_active");
-    free(job.samples);
+    releaseRecordedAudioClip(job.recording);
     return false;
   }
 
@@ -992,7 +988,7 @@ bool queueCloudJob(CloudQueuedJob& job) {
 
   if (jobBusy) {
     Serial.println("api=busy reason=request_in_flight");
-    free(job.samples);
+    releaseRecordedAudioClip(job.recording);
     return false;
   }
 
@@ -1044,7 +1040,7 @@ void cancelAiWork() {
   aiCancelGeneration++;
 
   if (cloudJobQueued && queuedCloudJob.owner == CloudJobOwner::Ai) {
-    free(queuedCloudJob.samples);
+    releaseRecordedAudioClip(queuedCloudJob.recording);
     clearQueuedJobLocked();
     cloudJobQueued = false;
   }
@@ -1097,25 +1093,23 @@ bool queueCloudChattieInputToTextDisplay(const char* input) {
   return queued;
 }
 
-bool queueRecordedAudioToTextDisplay(int16_t* samples,
-                                     size_t sampleCount,
-                                     uint32_t sampleRateHz,
-                                     bool aiOwned) {
+bool queueRecordedAudioToTextDisplay(RecordedAudioClip& recording, bool aiOwned) {
   if (!cloudConfigured()) {
     Serial.println("api=cloud_missing_config file=include/cloud_config.h");
     Serial.println("api=cloud_expected keys=kCloudChattieUrl,kBrainSharedSecret");
-    free(samples);
+    releaseRecordedAudioClip(recording);
     return false;
   }
 
-  if (samples == nullptr || sampleCount == 0 || sampleRateHz == 0) {
+  if (recording.data == nullptr || recording.byteCount == 0 ||
+      recording.sampleCount == 0 || recording.sampleRateHz == 0) {
     Serial.println("record=empty");
-    free(samples);
+    releaseRecordedAudioClip(recording);
     return false;
   }
 
   if (!ensureWifiConnected()) {
-    free(samples);
+    releaseRecordedAudioClip(recording);
     return false;
   }
 
@@ -1123,15 +1117,15 @@ bool queueRecordedAudioToTextDisplay(int16_t* samples,
   job.type = CloudJobType::RecordedAudio;
   job.owner = aiOwned ? CloudJobOwner::Ai : CloudJobOwner::Manual;
   job.aiGeneration = aiCancelGeneration;
-  job.samples = samples;
-  job.sampleCount = sampleCount;
-  job.sampleRateHz = sampleRateHz;
+  job.recording = recording;
+  recording = {};
 
   const bool queued = queueCloudJob(job);
   if (queued) {
-    Serial.printf("api=recording_queued samples=%u rate=%lu\n",
-                  static_cast<unsigned>(sampleCount),
-                  static_cast<unsigned long>(sampleRateHz));
+    Serial.printf("api=recording_queued samples=%u rate=%lu bytes=%u format=ima_adpcm\n",
+                  static_cast<unsigned>(job.recording.sampleCount),
+                  static_cast<unsigned long>(job.recording.sampleRateHz),
+                  static_cast<unsigned>(job.recording.byteCount));
   }
   return queued;
 }

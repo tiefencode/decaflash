@@ -22,7 +22,7 @@ static constexpr uint32_t kRecognitionRecentOnsetMs = 180;
 static constexpr uint8_t kRecognitionMinBeatConfidence = 18;
 static constexpr uint32_t kFailureCooldownMs = 30000;
 static constexpr uint32_t kSuccessCooldownMs = 600000;
-static constexpr uint32_t kRecordDurationMs = 3000;
+static constexpr uint32_t kRecordDurationMs = 12000;
 
 enum class TransientIcon : uint8_t {
   None = 0,

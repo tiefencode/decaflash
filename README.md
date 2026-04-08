@@ -9,7 +9,7 @@ V1 is intentionally small:
 - `brain` can already broadcast demo commands and a separate beat clock over ESP-NOW
 - `brain` can now read the Unit Mini PDM on raw-signal level and print live stats over serial
 - `brain` can now display short serial-triggered text on the Matrix
-- `brain` can now use stored Wi-Fi credentials for an initial HTTPS API test command
+- `brain` can now use stored Wi-Fi credentials plus Cloud Worker endpoints for AudD and Chattie
 - `node` is the active V1 firmware for an ATOM Lite with Flashlight Unit
 - microphone and RGB strip nodes come later
 - the current node demo is driven directly with the ATOM button
@@ -20,6 +20,7 @@ V1 is intentionally small:
 - `apps/node/src` contains the shared node app plus the current flashlight renderer
 - `shared/include` contains types shared across apps
 - `docs` contains scope notes and project documentation
+- `workers/decaflash` contains the Cloudflare Worker for `/api/audd` and `/api/chattie`
 
 ## PlatformIO Environments
 
@@ -43,6 +44,14 @@ Build node firmware:
 
 ```bash
 pio run -e node
+```
+
+Run the Cloudflare Worker locally:
+
+```bash
+cd /Users/tiefencode/Projekte/decaflash/workers/decaflash
+npm install
+npm run dev
 ```
 
 ## Flash
