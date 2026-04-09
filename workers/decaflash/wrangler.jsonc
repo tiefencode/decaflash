@@ -4,10 +4,10 @@
   "main": "src/index.js",
   "compatibility_date": "2026-04-08",
   "workers_dev": true,
-  "r2_buckets": [
+  "kv_namespaces": [
     {
       "binding": "DEBUG_ARTIFACTS",
-      "bucket_name": "decaflash-debug-artifacts"
+      "id": "98868f583d044d1d894abcc34ffd0e92"
     }
   ],
   "observability": {

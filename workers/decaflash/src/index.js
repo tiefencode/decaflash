@@ -338,8 +338,7 @@ async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
 function getDebugStore(env) {
   return env?.DEBUG_ARTIFACTS &&
     typeof env.DEBUG_ARTIFACTS.get === "function" &&
-    typeof env.DEBUG_ARTIFACTS.put === "function" &&
-    typeof env.DEBUG_ARTIFACTS.head === "function"
+    typeof env.DEBUG_ARTIFACTS.put === "function"
     ? env.DEBUG_ARTIFACTS
     : null;
 }
