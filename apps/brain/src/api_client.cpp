@@ -35,11 +35,11 @@ static constexpr size_t kCloudJsonPayloadCapacity = 512;
 static constexpr uint32_t kCloudTextDisplayDelayMs = 320;
 static constexpr uint32_t kCloudWorkerStackWords = 12288;
 static constexpr BaseType_t kCloudWorkerPriority = 1;
-// Keep Wi-Fi join tolerant, but fail cloud work faster so AI does not hold the
-// ESP-NOW core path paused for too long.
-static constexpr uint16_t kCloudConnectTimeoutMs = 8000;
-static constexpr uint16_t kCloudRequestTimeoutMs = 15000;
-static constexpr uint16_t kCloudResponseIdleTimeoutMs = 500;
+// Keep a single moderate cloud timeout budget now that the song flow runs as
+// one combined Worker request instead of two separate calls from the Brain.
+static constexpr uint16_t kCloudConnectTimeoutMs = 10000;
+static constexpr uint16_t kCloudRequestTimeoutMs = 25000;
+static constexpr uint16_t kCloudResponseIdleTimeoutMs = 1000;
 static constexpr char kCloudChattieMonitorPrompt[] =
   "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. "
   "Nutze die Nutzereingabe als Inspiration. Keine Erklaerung. Keine Emojis. "
