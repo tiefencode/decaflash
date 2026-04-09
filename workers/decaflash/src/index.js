@@ -14,7 +14,6 @@ const IMA_INDEX_TABLE = [
   -1, -1, -1, -1, 2, 4, 6, 8,
 ];
 const IMA_BLOCK_SAMPLE_COUNT = 256;
-const DEBUG_CACHE_SECONDS = 3600;
 const DEBUG_WAV_KV_KEY = "debug:last:wav";
 const DEBUG_JSON_KV_KEY = "debug:last:json";
 const CHATTIE_SONG_PROMPT =
@@ -279,20 +278,23 @@ async function getDebugAsset(env, options) {
     return jsonResponse({ error: "debug_store_unconfigured" }, 500);
   }
 
-  const stored = await debugStore.get(options.kvKey, "arrayBuffer");
+  const stored = await debugStore.get(options.kvKey);
   if (!stored) {
     return jsonResponse({ error: "debug_asset_not_found" }, 404);
   }
 
-  const headers = {
-    "content-type": options.contentType,
+  const headers = new Headers({
     "cache-control": "no-store",
-  };
+  });
+  stored.writeHttpMetadata(headers);
+  if (!headers.has("content-type")) {
+    headers.set("content-type", options.contentType);
+  }
   if (options.contentDisposition) {
-    headers["content-disposition"] = options.contentDisposition;
+    headers.set("content-disposition", options.contentDisposition);
   }
 
-  return new Response(stored, { headers });
+  return new Response(stored.body, { headers });
 }
 
 async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
@@ -314,10 +316,17 @@ async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
 
   await Promise.all([
     debugStore.put(DEBUG_WAV_KV_KEY, wavBytes, {
-      expirationTtl: DEBUG_CACHE_SECONDS,
+      httpMetadata: {
+        contentType: "audio/wav",
+        contentDisposition: 'attachment; filename="decaflash-last.wav"',
+        cacheControl: "no-store",
+      },
     }),
     debugStore.put(DEBUG_JSON_KV_KEY, JSON.stringify(metadata, null, 2), {
-      expirationTtl: DEBUG_CACHE_SECONDS,
+      httpMetadata: {
+        contentType: "application/json; charset=utf-8",
+        cacheControl: "no-store",
+      },
     }),
   ]);
 
@@ -327,7 +336,10 @@ async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
 }
 
 function getDebugStore(env) {
-  return env?.DEBUG_ARTIFACTS && typeof env.DEBUG_ARTIFACTS.get === "function"
+  return env?.DEBUG_ARTIFACTS &&
+    typeof env.DEBUG_ARTIFACTS.get === "function" &&
+    typeof env.DEBUG_ARTIFACTS.put === "function" &&
+    typeof env.DEBUG_ARTIFACTS.head === "function"
     ? env.DEBUG_ARTIFACTS
     : null;
 }

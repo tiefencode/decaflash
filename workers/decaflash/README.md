@@ -47,9 +47,18 @@ If Cloudflare creates a new Worker project or environment, set these secrets aga
 
 Required Cloudflare setup:
 
-- create a KV namespace, e.g. `decaflash-debug-artifacts`
+- create an R2 bucket named `decaflash-debug-artifacts`
 - bind it as `DEBUG_ARTIFACTS`
-- keep the binding in `wrangler.jsonc` via `kv_namespaces`
+- keep the binding in `wrangler.jsonc` via `r2_buckets`
+
+The worker overwrites the same two objects on every successful `/api/audd` run:
+
+- `debug:last:wav`
+- `debug:last:json`
+
+That means the bucket does not grow without bounds for this debug flow.
+
+You can inspect or download these objects directly in the Cloudflare R2 dashboard.
 
 After a fresh `/api/audd` run, download the latest debug audio:
 
@@ -97,11 +106,11 @@ Response:
 
 `/api/audd` expects multipart form data with:
 
-- `encoding=ima_adpcm`
+- `encoding=mulaw`
 - `sample_rate_hz`
 - `sample_count`
-- `container=decaflash_ima_adpcm`
-- `file=<binary adpcm blob>`
+- `container=decaflash_mulaw`
+- `file=<binary mulaw blob>`
 
 Response:
 
