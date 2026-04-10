@@ -50,8 +50,15 @@ Required Cloudflare setup:
 - create a KV namespace, e.g. `decaflash-debug-artifacts`
 - bind it as `DEBUG_ARTIFACTS`
 - keep the binding in `wrangler.jsonc` via `kv_namespaces`
+- treat `wrangler.jsonc` as the source of truth for the binding when deploying from Wrangler or Git
 
-The worker overwrites the same two keys on every successful `/api/audd` run:
+Current implementation notes:
+
+- debug artifacts are read and written only through Workers KV
+- there is no `caches.default` fallback for `/api/debug/last.wav` or `/api/debug/last.json`
+- `/api/debug/*` returns `404` when the key does not exist and `500` when the KV binding is missing
+
+The worker overwrites the same two keys on every decoded `/api/audd` run:
 
 - `debug:last:wav`
 - `debug:last:json`
@@ -62,7 +69,7 @@ After a fresh `/api/audd` run, download the latest debug audio:
 
 ```bash
 curl -fL \
-  -H 'Authorization: Bearer db3953d42370ed9d7c329704988ecaa6a84a693ea84d76e8f3627d05d9f353f5' \
+  -H "Authorization: Bearer $BRAIN_SHARED_SECRET" \
   'https://decaflash.tiefencode.workers.dev/api/debug/last.wav' \
   -o "$HOME/Downloads/decaflash-last.wav"
 ```
@@ -71,7 +78,7 @@ Download the matching metadata:
 
 ```bash
 curl -fL \
-  -H 'Authorization: Bearer db3953d42370ed9d7c329704988ecaa6a84a693ea84d76e8f3627d05d9f353f5' \
+  -H "Authorization: Bearer $BRAIN_SHARED_SECRET" \
   'https://decaflash.tiefencode.workers.dev/api/debug/last.json' \
   -o "$HOME/Downloads/decaflash-last.json"
 ```

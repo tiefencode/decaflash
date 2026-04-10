@@ -42,6 +42,7 @@ export default {
       if (url.pathname === "/api/debug/last.wav") {
         return await getDebugAsset(env, {
           kvKey: DEBUG_WAV_KV_KEY,
+          type: "arrayBuffer",
           contentType: "audio/wav",
           contentDisposition: 'attachment; filename="decaflash-last.wav"',
         });
@@ -50,6 +51,7 @@ export default {
       if (url.pathname === "/api/debug/last.json") {
         return await getDebugAsset(env, {
           kvKey: DEBUG_JSON_KV_KEY,
+          type: "text",
           contentType: "application/json; charset=utf-8",
         });
       }
@@ -278,23 +280,20 @@ async function getDebugAsset(env, options) {
     return jsonResponse({ error: "debug_store_unconfigured" }, 500);
   }
 
-  const stored = await debugStore.get(options.kvKey);
-  if (!stored) {
+  const stored = await debugStore.get(options.kvKey, options.type);
+  if (stored === null) {
     return jsonResponse({ error: "debug_asset_not_found" }, 404);
   }
 
   const headers = new Headers({
     "cache-control": "no-store",
+    "content-type": options.contentType,
   });
-  stored.writeHttpMetadata(headers);
-  if (!headers.has("content-type")) {
-    headers.set("content-type", options.contentType);
-  }
   if (options.contentDisposition) {
     headers.set("content-disposition", options.contentDisposition);
   }
 
-  return new Response(stored.body, { headers });
+  return new Response(stored, { headers });
 }
 
 async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
@@ -314,21 +313,8 @@ async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
     return;
   }
 
-  await Promise.all([
-    debugStore.put(DEBUG_WAV_KV_KEY, wavBytes, {
-      httpMetadata: {
-        contentType: "audio/wav",
-        contentDisposition: 'attachment; filename="decaflash-last.wav"',
-        cacheControl: "no-store",
-      },
-    }),
-    debugStore.put(DEBUG_JSON_KV_KEY, JSON.stringify(metadata, null, 2), {
-      httpMetadata: {
-        contentType: "application/json; charset=utf-8",
-        cacheControl: "no-store",
-      },
-    }),
-  ]);
+  await debugStore.put(DEBUG_WAV_KV_KEY, wavBytes);
+  await debugStore.put(DEBUG_JSON_KV_KEY, JSON.stringify(metadata, null, 2));
 
   console.log(
     `debug=stored wav_bytes=${wavBytes.byteLength} sample_count=${requestInfo.sample_count || 0} matched=${Boolean(upstreamInfo?.matched)}`,
