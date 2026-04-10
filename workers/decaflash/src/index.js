@@ -313,7 +313,12 @@ async function storeDebugArtifacts(env, requestInfo, wavBytes, upstreamInfo) {
     return;
   }
 
-  await debugStore.put(DEBUG_WAV_KV_KEY, wavBytes);
+  const wavBuffer = wavBytes.buffer.slice(
+    wavBytes.byteOffset,
+    wavBytes.byteOffset + wavBytes.byteLength,
+  );
+
+  await debugStore.put(DEBUG_WAV_KV_KEY, wavBuffer);
   await debugStore.put(DEBUG_JSON_KV_KEY, JSON.stringify(metadata, null, 2));
 
   console.log(
