@@ -37,6 +37,7 @@ bool textPlaybackActive = false;
 uint32_t nextTextPlaybackAtMs = 0;
 PlaybackPhase playbackPhase = PlaybackPhase::IntroFlash;
 uint32_t playbackPhaseStartedAtMs = 0;
+Owner textPlaybackOwner = Owner::Manual;
 
 bool appendPlaybackCharacter(size_t& length, uint8_t character) {
   if ((length + 1U) >= kTextBufferCapacity) {
@@ -125,6 +126,7 @@ void clearTextPlayback() {
   nextTextPlaybackAtMs = 0;
   playbackPhase = PlaybackPhase::IntroFlash;
   playbackPhaseStartedAtMs = 0;
+  textPlaybackOwner = Owner::Manual;
   textPlaybackBuffer[0] = '\0';
   decaflash::brain::matrix::clearAllPixels();
 }
@@ -137,7 +139,7 @@ void stopTextPlayback(bool announce = true) {
   }
 }
 
-void startTextPlayback(const char* rawText, uint32_t delayMs) {
+void startTextPlayback(const char* rawText, uint32_t delayMs, Owner owner) {
   if (rawText == nullptr) {
     stopTextPlayback();
     return;
@@ -163,6 +165,7 @@ void startTextPlayback(const char* rawText, uint32_t delayMs) {
   nextTextPlaybackAtMs = playbackPhaseStartedAtMs;
   playbackPhase = PlaybackPhase::IntroFlash;
   textPlaybackActive = (length > 0) && (textPlaybackColumns > 0);
+  textPlaybackOwner = owner;
 
   if (!textPlaybackActive) {
     stopTextPlayback();
@@ -180,13 +183,26 @@ bool isActive() {
   return textPlaybackActive;
 }
 
-bool start(const char* text, uint32_t delayMs) {
-  startTextPlayback(text, delayMs);
+bool isAiOwnedActive() {
+  return textPlaybackActive && textPlaybackOwner == Owner::Ai;
+}
+
+bool start(const char* text, uint32_t delayMs, Owner owner) {
+  startTextPlayback(text, delayMs, owner);
   return textPlaybackActive;
 }
 
 void stop(bool announce) {
   stopTextPlayback(announce);
+}
+
+bool stopAiOwned(bool announce) {
+  if (!isAiOwnedActive()) {
+    return false;
+  }
+
+  stopTextPlayback(announce);
+  return true;
 }
 
 void printHelp() {

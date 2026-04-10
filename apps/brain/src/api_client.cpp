@@ -1007,6 +1007,7 @@ void begin() {
 void service(uint32_t now) {
   bool shouldStopManagedWifiSession = false;
   bool shouldStartText = false;
+  CloudJobOwner textOwner = CloudJobOwner::Manual;
   char textBuffer[kCloudTextCapacity] = {};
 
   portENTER_CRITICAL(&cloudJobMux);
@@ -1021,6 +1022,8 @@ void service(uint32_t now) {
     completedDisplayPending = false;
     completedDisplayText[0] = '\0';
     completedDisplayAtMs = 0;
+    textOwner = completedDisplayOwner;
+    completedDisplayOwner = CloudJobOwner::Manual;
     shouldStartText = textBuffer[0] != '\0';
   }
   portEXIT_CRITICAL(&cloudJobMux);
@@ -1032,7 +1035,12 @@ void service(uint32_t now) {
   }
 
   if (shouldStartText) {
-    decaflash::brain::text_playback::start(textBuffer);
+    decaflash::brain::text_playback::start(
+      textBuffer,
+      0,
+      textOwner == CloudJobOwner::Ai
+        ? decaflash::brain::text_playback::Owner::Ai
+        : decaflash::brain::text_playback::Owner::Manual);
   }
 }
 

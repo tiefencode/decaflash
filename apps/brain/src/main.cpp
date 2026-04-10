@@ -677,14 +677,8 @@ void selectNextScene();
 void activateBrain();
 
 void handleButtonInput(uint32_t now) {
-  if (decaflash::brain::api_client::radioPauseActive()) {
-    buttonPressedLastLoop = M5.Btn.isPressed();
-    buttonLongPressHandled = false;
-    buttonPressedAtMs = now;
-    return;
-  }
-
   const bool buttonPressed = M5.Btn.isPressed();
+  const bool radioPauseActive = decaflash::brain::api_client::radioPauseActive();
 
   if (buttonPressed && !buttonPressedLastLoop) {
     buttonPressedAtMs = now;
@@ -693,8 +687,18 @@ void handleButtonInput(uint32_t now) {
 
   if (buttonPressed && !buttonLongPressHandled &&
       (now - buttonPressedAtMs) >= decaflash::brain::ai_mode::togglePressMs()) {
-    decaflash::brain::ai_mode::toggle(now, microphone);
-    buttonLongPressHandled = true;
+    if (!radioPauseActive || decaflash::brain::ai_mode::enabled()) {
+      decaflash::brain::ai_mode::toggle(now, microphone);
+      buttonLongPressHandled = true;
+    }
+  }
+
+  if (radioPauseActive) {
+    if (!buttonPressed && buttonPressedLastLoop) {
+      buttonLongPressHandled = false;
+    }
+    buttonPressedLastLoop = buttonPressed;
+    return;
   }
 
   if (!buttonPressed && buttonPressedLastLoop) {

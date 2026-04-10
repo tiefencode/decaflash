@@ -96,6 +96,7 @@ void disableForWifiFailure(uint32_t now, const char* reason) {
   (void)now;
   aiModeEnabled = false;
   decaflash::brain::api_client::cancelAiWork();
+  decaflash::brain::text_playback::stopAiOwned(false);
   aiRecordingOwned = false;
   aiReadyToListenAtMs = 0;
   aiCooldownUntilMs = 0;
@@ -107,6 +108,10 @@ void disableForWifiFailure(uint32_t now, const char* reason) {
 
 uint32_t togglePressMs() {
   return kTogglePressMs;
+}
+
+bool enabled() {
+  return aiModeEnabled;
 }
 
 void toggle(uint32_t now, PdmMicrophone& microphone) {
@@ -124,6 +129,7 @@ void toggle(uint32_t now, PdmMicrophone& microphone) {
 
   microphone.cancelRecording();
   decaflash::brain::api_client::cancelAiWork();
+  decaflash::brain::text_playback::stopAiOwned(false);
   aiRecordingOwned = false;
   Serial.println("AI: disabled");
   showTransientIcon(TransientIcon::AiDisabled, 0xFF0000, kToggleDisplayMs);

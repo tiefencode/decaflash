@@ -9,6 +9,7 @@ class PdmMicrophone;
 namespace ai_mode {
 
 uint32_t togglePressMs();
+bool enabled();
 void toggle(uint32_t now, PdmMicrophone& microphone);
 void service(uint32_t now, const PdmMicrophone& microphone);
 bool blocksBeatDotOverlay(uint32_t now, const PdmMicrophone& microphone);
