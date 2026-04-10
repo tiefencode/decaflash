@@ -8,12 +8,11 @@
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
 #define DECAFLASH_WIFI_CREDENTIALS_AVAILABLE 1
+#ifndef DECAFLASH_WIFI_CREDENTIALS_LIST
+#error "include/wifi_credentials.h must define DECAFLASH_WIFI_CREDENTIALS_LIST(X)"
+#endif
 #else
 #define DECAFLASH_WIFI_CREDENTIALS_AVAILABLE 0
-namespace decaflash::secrets {
-static constexpr char kWifiSsid[] = "";
-static constexpr char kWifiPassword[] = "";
-}  // namespace decaflash::secrets
 #endif
 
 namespace decaflash::brain::wifi_manager {
@@ -26,6 +25,26 @@ static constexpr uint8_t kScanListLimit = 12;
 static constexpr uint32_t kConnectedIndicatorMs = 2000;
 static constexpr uint32_t kFailedIndicatorMs = 1500;
 
+struct WifiCredential {
+  const char* ssid;
+  const char* password;
+};
+
+#if DECAFLASH_WIFI_CREDENTIALS_AVAILABLE
+#define DECAFLASH_WIFI_CREDENTIAL_ENTRY(ssidValue, passwordValue) {ssidValue, passwordValue},
+static constexpr WifiCredential kConfiguredCredentials[] = {
+  DECAFLASH_WIFI_CREDENTIALS_LIST(DECAFLASH_WIFI_CREDENTIAL_ENTRY)
+};
+#undef DECAFLASH_WIFI_CREDENTIAL_ENTRY
+#else
+static constexpr WifiCredential kConfiguredCredentials[] = {
+  {"", ""},
+};
+#endif
+
+static constexpr size_t kConfiguredCredentialCount =
+  sizeof(kConfiguredCredentials) / sizeof(kConfiguredCredentials[0]);
+
 enum class StatusIndicator : uint8_t {
   Idle = 0,
   Connecting = 1,
@@ -37,8 +56,23 @@ StatusIndicator statusIndicator = StatusIndicator::Idle;
 uint32_t connectedIndicatorUntilMs = 0;
 uint32_t failedIndicatorUntilMs = 0;
 
+bool credentialConfigured(const WifiCredential& credential) {
+  return credential.ssid != nullptr && credential.ssid[0] != '\0';
+}
+
+size_t configuredCredentialCount() {
+  size_t count = 0;
+  for (size_t i = 0; i < kConfiguredCredentialCount; ++i) {
+    if (credentialConfigured(kConfiguredCredentials[i])) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
 bool hasNonEmptyCredentials() {
-  return decaflash::secrets::kWifiSsid[0] != '\0';
+  return configuredCredentialCount() > 0;
 }
 
 const char* statusName(wl_status_t status) {
@@ -92,32 +126,73 @@ void renderStatusPixelNow(uint32_t now) {
   decaflash::brain::matrix::clearStatusPixel();
 }
 
-bool targetSsidVisible(bool verbose) {
+int findConfiguredCredentialIndex(const String& ssid) {
+  for (size_t i = 0; i < kConfiguredCredentialCount; ++i) {
+    if (!credentialConfigured(kConfiguredCredentials[i])) {
+      continue;
+    }
+
+    if (ssid == kConfiguredCredentials[i].ssid) {
+      return static_cast<int>(i);
+    }
+  }
+
+  return -1;
+}
+
+bool credentialAttempted(size_t credentialIndex,
+                         const size_t* attemptedCredentials,
+                         size_t attemptedCount) {
+  for (size_t i = 0; i < attemptedCount; ++i) {
+    if (attemptedCredentials[i] == credentialIndex) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+size_t collectVisibleCredentials(size_t* visibleCredentials,
+                                 size_t visibleCapacity,
+                                 bool verbose) {
+  bool visibleByCredential[kConfiguredCredentialCount] = {};
+  int32_t strongestRssiByCredential[kConfiguredCredentialCount] = {};
+  uint8_t channelByCredential[kConfiguredCredentialCount] = {};
+
   const int networkCount = WiFi.scanNetworks(false, true);
   if (verbose) {
     Serial.printf("WIFI: scan count=%d\n", networkCount);
   }
 
   if (networkCount <= 0) {
-    return false;
+    return 0;
   }
 
-  bool foundTarget = false;
-  const uint8_t printedCount = (networkCount > kScanListLimit) ? kScanListLimit : networkCount;
-  for (uint8_t i = 0; i < printedCount; ++i) {
+  const int printedCount = (networkCount > kScanListLimit) ? kScanListLimit : networkCount;
+  for (int i = 0; i < networkCount; ++i) {
     const String ssid = WiFi.SSID(i);
     const int32_t rssi = WiFi.RSSI(i);
     const uint8_t channel = WiFi.channel(i);
+    const int credentialIndex = findConfiguredCredentialIndex(ssid);
+    const bool configured = credentialIndex >= 0;
 
-    if (verbose) {
+    if (verbose && i < printedCount) {
       Serial.printf("WIFI: scan ssid=%s rssi=%ld ch=%u\n",
                     ssid.c_str(),
                     static_cast<long>(rssi),
                     static_cast<unsigned>(channel));
     }
 
-    if (ssid == decaflash::secrets::kWifiSsid) {
-      foundTarget = true;
+    if (!configured) {
+      continue;
+    }
+
+    const size_t configuredIndex = static_cast<size_t>(credentialIndex);
+    if (!visibleByCredential[configuredIndex] ||
+        rssi > strongestRssiByCredential[configuredIndex]) {
+      visibleByCredential[configuredIndex] = true;
+      strongestRssiByCredential[configuredIndex] = rssi;
+      channelByCredential[configuredIndex] = channel;
     }
   }
 
@@ -125,8 +200,79 @@ bool targetSsidVisible(bool verbose) {
     Serial.printf("WIFI: scan more=%d\n", networkCount - printedCount);
   }
 
+  size_t visibleCount = 0;
+  for (size_t i = 0; i < kConfiguredCredentialCount && visibleCount < visibleCapacity; ++i) {
+    if (!credentialConfigured(kConfiguredCredentials[i]) || !visibleByCredential[i]) {
+      continue;
+    }
+
+    visibleCredentials[visibleCount++] = i;
+
+    if (verbose) {
+      Serial.printf("WIFI: candidate ssid=%s rssi=%ld ch=%u priority=%u\n",
+                    kConfiguredCredentials[i].ssid,
+                    static_cast<long>(strongestRssiByCredential[i]),
+                    static_cast<unsigned>(channelByCredential[i]),
+                    static_cast<unsigned>(visibleCount));
+    }
+  }
+
+  if (verbose && visibleCount == 0 && configuredCredentialCount() > 0) {
+    Serial.println("WIFI: candidate none_visible");
+  }
+
   WiFi.scanDelete();
-  return foundTarget;
+  return visibleCount;
+}
+
+bool connectCredential(size_t credentialIndex, bool renderStatus) {
+  if (credentialIndex >= kConfiguredCredentialCount) {
+    return false;
+  }
+
+  const WifiCredential& credential = kConfiguredCredentials[credentialIndex];
+  if (!credentialConfigured(credential)) {
+    return false;
+  }
+
+  Serial.printf("WIFI: connect_attempt ssid=%s priority=%u/%u\n",
+                credential.ssid,
+                static_cast<unsigned>(credentialIndex + 1U),
+                static_cast<unsigned>(configuredCredentialCount()));
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(150);
+  WiFi.begin(credential.ssid, credential.password != nullptr ? credential.password : "");
+
+  const uint32_t startedAtMs = millis();
+  while ((millis() - startedAtMs) < kConnectTimeoutMs) {
+    if (renderStatus) {
+      renderStatusPixelNow(millis());
+    }
+
+    if (isConnected()) {
+      setConnectedIndicator(millis());
+      if (renderStatus) {
+        renderStatusPixelNow(millis());
+      }
+      Serial.printf("WIFI: connected ssid=%s ip=%s rssi=%d\n",
+                    WiFi.SSID().c_str(),
+                    WiFi.localIP().toString().c_str(),
+                    WiFi.RSSI());
+      return true;
+    }
+
+    delay(kConnectPollMs);
+  }
+
+  const wl_status_t status = WiFi.status();
+  WiFi.disconnect(true, false);
+  Serial.printf("WIFI: candidate_failed ssid=%s status=%d name=%s\n",
+                credential.ssid,
+                static_cast<int>(status),
+                statusName(status));
+  return false;
 }
 
 }  // namespace
@@ -171,41 +317,47 @@ bool connect(bool renderStatus) {
   if (renderStatus) {
     renderStatusPixelNow(millis());
   }
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);
-  delay(150);
-  WiFi.begin(decaflash::secrets::kWifiSsid, decaflash::secrets::kWifiPassword);
 
-  const uint32_t startedAtMs = millis();
-  while ((millis() - startedAtMs) < kConnectTimeoutMs) {
-    if (renderStatus) {
-      renderStatusPixelNow(millis());
-    }
+  size_t visibleCredentials[kConfiguredCredentialCount] = {};
+  const size_t visibleCredentialCount = collectVisibleCredentials(
+    visibleCredentials,
+    kConfiguredCredentialCount,
+    false);
+  size_t attemptedCredentials[kConfiguredCredentialCount] = {};
+  size_t attemptedCount = 0;
 
-    if (isConnected()) {
-      setConnectedIndicator(millis());
-      if (renderStatus) {
-        renderStatusPixelNow(millis());
-      }
-      Serial.printf("WIFI: connected ssid=%s ip=%s rssi=%d\n",
-                    WiFi.SSID().c_str(),
-                    WiFi.localIP().toString().c_str(),
-                    WiFi.RSSI());
-      return true;
-    }
-
-    delay(kConnectPollMs);
+  if (visibleCredentialCount == 0) {
+    Serial.println("WIFI: no_configured_network_visible fallback=ordered_connect");
   }
 
-  const wl_status_t status = WiFi.status();
-  WiFi.disconnect(true, false);
+  for (size_t i = 0; i < visibleCredentialCount; ++i) {
+    const size_t credentialIndex = visibleCredentials[i];
+    attemptedCredentials[attemptedCount++] = credentialIndex;
+    if (connectCredential(credentialIndex, renderStatus)) {
+      return true;
+    }
+  }
+
+  for (size_t credentialIndex = 0; credentialIndex < kConfiguredCredentialCount; ++credentialIndex) {
+    if (!credentialConfigured(kConfiguredCredentials[credentialIndex]) ||
+        credentialAttempted(credentialIndex, attemptedCredentials, attemptedCount)) {
+      continue;
+    }
+
+    attemptedCredentials[attemptedCount++] = credentialIndex;
+    Serial.printf("WIFI: fallback_attempt ssid=%s reason=not_visible_in_scan\n",
+                  kConfiguredCredentials[credentialIndex].ssid);
+    if (connectCredential(credentialIndex, renderStatus)) {
+      return true;
+    }
+  }
+
   setFailedIndicator(millis());
   if (renderStatus) {
     renderStatusPixelNow(millis());
   }
-  Serial.printf("WIFI: connect_failed status=%d name=%s\n",
-                static_cast<int>(status),
-                statusName(status));
+  Serial.printf("WIFI: connect_failed attempts=%u\n",
+                static_cast<unsigned>(attemptedCount));
   return false;
 }
 
@@ -276,23 +428,25 @@ bool statusPixelColor(uint32_t now, uint32_t& colorValue) {
 
 void scan() {
   WiFi.mode(WIFI_STA);
-  targetSsidVisible(true);
+  size_t visibleCredentials[kConfiguredCredentialCount] = {};
+  (void)collectVisibleCredentials(visibleCredentials, kConfiguredCredentialCount, true);
 }
 
 void printStatus() {
   if (isConnected()) {
-    Serial.printf("WIFI: status connected ssid=%s ip=%s rssi=%d\n",
+    Serial.printf("WIFI: status connected ssid=%s ip=%s rssi=%d credentials=%u\n",
                   WiFi.SSID().c_str(),
                   WiFi.localIP().toString().c_str(),
-                  WiFi.RSSI());
+                  WiFi.RSSI(),
+                  static_cast<unsigned>(configuredCredentialCount()));
     return;
   }
 
   const wl_status_t status = WiFi.status();
-  Serial.printf("WIFI: status disconnected wl=%d name=%s credentials=%s\n",
+  Serial.printf("WIFI: status disconnected wl=%d name=%s credentials=%u\n",
                 static_cast<int>(status),
                 statusName(status),
-                credentialsAvailable() ? "yes" : "no");
+                static_cast<unsigned>(configuredCredentialCount()));
 }
 
 }  // namespace decaflash::brain::wifi_manager

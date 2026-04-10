@@ -403,6 +403,7 @@ void recoverEspNowIfNeeded(uint32_t now) {
 }
 
 void serviceEspNowState(uint32_t now) {
+  const bool radioPauseActive = decaflash::brain::api_client::radioPauseActive();
   const bool wifiConnected = decaflash::brain::wifi_manager::isConnected();
   const uint8_t wifiChannel = decaflash::brain::wifi_manager::currentChannel();
   const bool radioStateChanged =
@@ -427,6 +428,10 @@ void serviceEspNowState(uint32_t now) {
       return;
     }
 
+    if (radioPauseActive && espNowBlockedByChannel) {
+      return;
+    }
+
     if (espNowBlockedByChannel) {
       Serial.printf("ESP-NOW: channel_ok channel=%u\n",
                     static_cast<unsigned>(
@@ -437,7 +442,10 @@ void serviceEspNowState(uint32_t now) {
     requestEspNowRecovery(wifiConnected ? "wifi_state_changed" : "wifi_disconnected");
   }
 
-  if (!espNowBlockedByChannel && !espNowReady && !espNowRecoveryRequested) {
+  if (!radioPauseActive &&
+      !espNowBlockedByChannel &&
+      !espNowReady &&
+      !espNowRecoveryRequested) {
     requestEspNowRecovery("not_ready");
   }
 
@@ -447,6 +455,11 @@ void serviceEspNowState(uint32_t now) {
 void serviceManagedRadioPauseTransition() {
   const bool radioPauseActive = decaflash::brain::api_client::radioPauseActive();
   if (lastRadioPauseActive && !radioPauseActive) {
+    if (espNowBlockedByChannel && !decaflash::brain::wifi_manager::isConnected()) {
+      Serial.printf("ESP-NOW: channel_ok channel=%u\n",
+                    static_cast<unsigned>(decaflash::espnow_transport::kWifiChannel));
+      espNowBlockedByChannel = false;
+    }
     requestEspNowRecovery("wifi_session_ended");
   }
 
