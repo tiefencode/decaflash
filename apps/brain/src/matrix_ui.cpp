@@ -313,6 +313,14 @@ void clearMatrix() {
   flushFrameBuffer();
 }
 
+void drawSolidColor(uint32_t colorValue) {
+  clearFrameBuffer();
+  for (uint8_t pixel = 0; pixel < kMatrixPixelCount; ++pixel) {
+    setFramePixel(pixel, colorValue);
+  }
+  flushFrameBuffer();
+}
+
 void clearStatusPixel() {
   M5.dis.drawpix(kStatusPixelIndex, 0x000000);
 }

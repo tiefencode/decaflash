@@ -727,7 +727,17 @@ void updateBeatDotOverlay(uint32_t now) {
   decaflash::brain::matrix::clearBeatDotPixel();
 }
 
+bool currentMatrixUiOwnsStatusPixel(uint32_t now) {
+  return decaflash::brain::text_playback::isActive() ||
+         isSceneUiActive(now) ||
+         decaflash::brain::ai_mode::blocksBeatDotOverlay(now, microphone);
+}
+
 void updateStatusPixelOverlay(uint32_t now) {
+  if (currentMatrixUiOwnsStatusPixel(now)) {
+    return;
+  }
+
   uint32_t colorValue = 0;
   if (decaflash::brain::wifi_manager::statusPixelColor(now, colorValue)) {
     decaflash::brain::matrix::drawStatusPixelOverlay(colorValue);

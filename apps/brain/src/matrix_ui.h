@@ -7,6 +7,7 @@ namespace decaflash::brain::matrix {
 
 void clearAllPixels();
 void clearMatrix();
+void drawSolidColor(uint32_t colorValue);
 void clearStatusPixel();
 void clearBeatDotPixel();
 void drawSceneNumber(size_t sceneIndex);
