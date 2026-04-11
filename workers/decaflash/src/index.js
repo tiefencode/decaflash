@@ -14,7 +14,7 @@ const IMA_INDEX_TABLE = [
   -1, -1, -1, -1, 2, 4, 6, 8,
 ];
 const IMA_BLOCK_SAMPLE_COUNT = 256;
-const DEBUG_WAV_KV_KEY = "debug:last:wav:v2";
+const DEBUG_WAV_KV_KEY = "debug:last:wav";
 const DEBUG_JSON_KV_KEY = "debug:last:json";
 const CHATTIE_SONG_PROMPT =
   "Schreibe genau einen sehr kurzen kreativen deutschen Text fuer eine 5x5-LED-Matrix. " +
