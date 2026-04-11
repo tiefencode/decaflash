@@ -21,6 +21,7 @@ class NodeOutput {
   );
   void allOff();
   void flash100(uint16_t flashMs);
+  void showTemporaryLit(bool lit);
   void service(uint32_t now);
   const char* rendererName() const;
   bool surfaceModulationState(uint32_t now, SurfaceModulationState& state) const;

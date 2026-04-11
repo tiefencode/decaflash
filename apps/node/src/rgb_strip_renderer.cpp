@@ -384,6 +384,20 @@ void RgbStripRenderer::flash100(uint16_t flashMs) {
   allOff();
 }
 
+void RgbStripRenderer::setLit(bool lit) {
+  if (!initialized_) {
+    begin();
+  }
+
+  if (lit) {
+    renderSolid(255, 255, 255);
+    return;
+  }
+
+  fill_solid(gStripLeds, kLedCount, CRGB::Black);
+  FastLED.show();
+}
+
 void RgbStripRenderer::triggerAccent() {
   const uint32_t now = millis();
   accentStartedAtMs_ = now;

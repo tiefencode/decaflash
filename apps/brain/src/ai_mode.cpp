@@ -4,6 +4,7 @@
 
 #include "api_client.h"
 #include "matrix_ui.h"
+#include "node_text_channel.h"
 #include "pdm_microphone.h"
 #include "text_playback.h"
 
@@ -17,8 +18,8 @@ static constexpr uint32_t kMusicStableMs = 1500;
 static constexpr uint32_t kRecognitionFallbackMs = 1200;
 static constexpr uint32_t kRecognitionRecentOnsetMs = 180;
 static constexpr uint8_t kRecognitionMinBeatConfidence = 18;
-static constexpr uint32_t kFailureCooldownMs = 30000;
-static constexpr uint32_t kSuccessCooldownMs = 300000;
+static constexpr uint32_t kFailureCooldownMs = 60000;
+static constexpr uint32_t kSuccessCooldownMs = 420000;
 static constexpr uint32_t kRecordDurationMs = 12000;
 
 enum class TransientIcon : uint8_t {
@@ -96,6 +97,7 @@ void disableForWifiFailure(uint32_t now, const char* reason) {
   (void)now;
   aiModeEnabled = false;
   decaflash::brain::api_client::cancelAiWork();
+  decaflash::brain::node_text::stopAiOwned();
   decaflash::brain::text_playback::stopAiOwned(false);
   aiRecordingOwned = false;
   aiReadyToListenAtMs = 0;
@@ -129,6 +131,7 @@ void toggle(uint32_t now, PdmMicrophone& microphone) {
 
   microphone.cancelRecording();
   decaflash::brain::api_client::cancelAiWork();
+  decaflash::brain::node_text::stopAiOwned();
   decaflash::brain::text_playback::stopAiOwned(false);
   aiRecordingOwned = false;
   Serial.println("AI: disabled");

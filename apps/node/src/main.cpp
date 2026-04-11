@@ -26,6 +26,7 @@ using decaflash::protocol::BrainHelloMessage;
 using decaflash::protocol::ClockSyncMessage;
 using decaflash::protocol::FlashCommandMessage;
 using decaflash::protocol::NodeClockSyncTelemetry;
+using decaflash::protocol::NodeTextMessage;
 using decaflash::protocol::RgbCommandMessage;
 using decaflash::protocol::makeNodeStatusMessage;
 using decaflash::node::flashRenderCommandFor;
@@ -55,6 +56,7 @@ static constexpr uint16_t BRAIN_CONNECT_FLASH_DURATION_MS = 260;
 static constexpr uint32_t DUPLICATE_BEAT_GUARD_MS = 250;
 static constexpr uint16_t BPM = 120;
 static constexpr uint8_t DEFAULT_BEATS_PER_BAR = 4;
+static constexpr size_t kNodeTextSegmentCapacity = decaflash::protocol::kNodeTextLength * 10U;
 
 static constexpr FlashCommand REMOTE_IDLE_FLASH_COMMAND = {
   "Remote Idle",
@@ -142,6 +144,27 @@ struct FlashBurstState {
 
 FlashBurstState flashBurst;
 
+struct NodeTextSegment {
+  uint8_t units = 0;
+  bool on = false;
+};
+
+struct NodeTextOverlayState {
+  bool pending = false;
+  bool active = false;
+  bool outputLit = false;
+  uint32_t revision = 0;
+  uint32_t startedAtMs = 0;
+  uint32_t beatIntervalMs = 0;
+  uint32_t elapsedUnits = 0;
+  uint32_t nextSegmentAtMs = 0;
+  size_t segmentCount = 0;
+  size_t segmentIndex = 0;
+  NodeTextSegment segments[kNodeTextSegmentCapacity] = {};
+};
+
+NodeTextOverlayState nodeTextOverlay;
+
 enum class RunMode : uint8_t {
   Demo = 0,
   BrainWaiting = 1,
@@ -162,10 +185,13 @@ volatile bool hasPendingFlashCommand = false;
 volatile bool hasPendingRgbCommand = false;
 volatile bool hasPendingClockSync = false;
 volatile bool hasPendingBrainHello = false;
+volatile bool hasPendingNodeText = false;
 FlashCommandMessage pendingFlashCommandMessage = {};
 RgbCommandMessage pendingRgbCommandMessage = {};
 ClockSyncMessage pendingClockSyncMessage = {};
 BrainHelloMessage pendingBrainHelloMessage = {};
+NodeTextMessage pendingNodeTextMessage = {};
+uint32_t lastNodeTextRevision = 0;
 
 void onBeat();
 
@@ -404,6 +430,69 @@ bool isBrainOwned(RunMode mode) {
   return mode != RunMode::Demo;
 }
 
+struct MorseEntry {
+  char character;
+  const char* pattern;
+};
+
+const MorseEntry kMorseTable[] = {
+  {'A', ".-"},
+  {'B', "-..."},
+  {'C', "-.-."},
+  {'D', "-.."},
+  {'E', "."},
+  {'F', "..-."},
+  {'G', "--."},
+  {'H', "...."},
+  {'I', ".."},
+  {'J', ".---"},
+  {'K', "-.-"},
+  {'L', ".-.."},
+  {'M', "--"},
+  {'N', "-."},
+  {'O', "---"},
+  {'P', ".--."},
+  {'Q', "--.-"},
+  {'R', ".-."},
+  {'S', "..."},
+  {'T', "-"},
+  {'U', "..-"},
+  {'V', "...-"},
+  {'W', ".--"},
+  {'X', "-..-"},
+  {'Y', "-.--"},
+  {'Z', "--.."},
+  {'0', "-----"},
+  {'1', ".----"},
+  {'2', "..---"},
+  {'3', "...--"},
+  {'4', "....-"},
+  {'5', "....."},
+  {'6', "-...."},
+  {'7', "--..."},
+  {'8', "---.."},
+  {'9', "----."},
+};
+
+char uppercaseAscii(char character) {
+  if (character >= 'a' && character <= 'z') {
+    return static_cast<char>(character - 'a' + 'A');
+  }
+
+  return character;
+}
+
+const char* morsePatternFor(char character) {
+  const char normalized = uppercaseAscii(character);
+  for (const auto& entry : kMorseTable) {
+    if (entry.character == normalized) {
+      return entry.pattern;
+    }
+  }
+
+  return nullptr;
+}
+
 int16_t clampPhaseErrorMs(int32_t phaseErrorMs) {
   if (phaseErrorMs < -32768) {
     return -32768;
@@ -443,6 +532,171 @@ void logFlashVariationChange(uint32_t bar) {
 
 void resetFlashBurst() {
   flashBurst = {};
+}
+
+bool appendNodeTextSegment(bool on, uint16_t units) {
+  while (units > 0U) {
+    const uint8_t chunkUnits = static_cast<uint8_t>((units > 255U) ? 255U : units);
+    if (nodeTextOverlay.segmentCount > 0 &&
+        nodeTextOverlay.segments[nodeTextOverlay.segmentCount - 1U].on == on &&
+        nodeTextOverlay.segments[nodeTextOverlay.segmentCount - 1U].units <=
+          static_cast<uint8_t>(255U - chunkUnits)) {
+      nodeTextOverlay.segments[nodeTextOverlay.segmentCount - 1U].units =
+        static_cast<uint8_t>(nodeTextOverlay.segments[nodeTextOverlay.segmentCount - 1U].units +
+                             chunkUnits);
+    } else {
+      if (nodeTextOverlay.segmentCount >= kNodeTextSegmentCapacity) {
+        return false;
+      }
+
+      nodeTextOverlay.segments[nodeTextOverlay.segmentCount].units = chunkUnits;
+      nodeTextOverlay.segments[nodeTextOverlay.segmentCount].on = on;
+      nodeTextOverlay.segmentCount++;
+    }
+
+    units = static_cast<uint16_t>(units - chunkUnits);
+  }
+
+  return true;
+}
+
+bool appendMorsePattern(const char* pattern) {
+  if (pattern == nullptr || pattern[0] == '\0') {
+    return false;
+  }
+
+  for (size_t index = 0; pattern[index] != '\0'; ++index) {
+    const uint16_t onUnits = (pattern[index] == '-') ? 2U : 1U;
+    if (!appendNodeTextSegment(true, onUnits)) {
+      return false;
+    }
+
+    if (pattern[index + 1U] != '\0' && !appendNodeTextSegment(false, 1U)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool buildNodeTextOverlay(const char* text) {
+  nodeTextOverlay.segmentCount = 0;
+
+  bool haveLetter = false;
+  bool wordGapPending = false;
+  for (size_t index = 0; text != nullptr && text[index] != '\0'; ++index) {
+    const char character = text[index];
+    if (character == ' ') {
+      if (haveLetter) {
+        wordGapPending = true;
+      }
+      continue;
+    }
+
+    const char* pattern = morsePatternFor(character);
+    if (pattern == nullptr) {
+      continue;
+    }
+
+    if (haveLetter) {
+      if (!appendNodeTextSegment(false, wordGapPending ? 4U : 2U)) {
+        return false;
+      }
+    }
+
+    if (!appendMorsePattern(pattern)) {
+      return false;
+    }
+
+    haveLetter = true;
+    wordGapPending = false;
+  }
+
+  return nodeTextOverlay.segmentCount > 0;
+}
+
+uint32_t nodeTextUnitsToMs(uint32_t units, uint32_t intervalMs) {
+  return (units * intervalMs) / 2U;
+}
+
+void clearNodeTextOverlay(bool clearOutput = true) {
+  if (clearOutput && (nodeTextOverlay.active || nodeTextOverlay.outputLit)) {
+    renderer.showTemporaryLit(false);
+  }
+
+  nodeTextOverlay = {};
+}
+
+void queueNodeTextOverlay(const NodeTextMessage& message) {
+  clearNodeTextOverlay();
+  nodeTextOverlay.revision = message.textRevision;
+  if (!buildNodeTextOverlay(message.text)) {
+    Serial.printf("TEXT: ignored empty revision=%lu\n",
+                  static_cast<unsigned long>(message.textRevision));
+    clearNodeTextOverlay(false);
+    return;
+  }
+
+  nodeTextOverlay.pending = true;
+  Serial.printf("TEXT: queued revision=%lu segments=%u\n",
+                static_cast<unsigned long>(nodeTextOverlay.revision),
+                static_cast<unsigned>(nodeTextOverlay.segmentCount));
+}
+
+void startPendingNodeTextOverlay(uint32_t now) {
+  if (!nodeTextOverlay.pending || nodeTextOverlay.segmentCount == 0) {
+    return;
+  }
+
+  nodeTextOverlay.pending = false;
+  nodeTextOverlay.active = true;
+  nodeTextOverlay.startedAtMs = now;
+  nodeTextOverlay.beatIntervalMs = (beatIntervalMs == 0U) ? bpmToIntervalMs(BPM) : beatIntervalMs;
+  nodeTextOverlay.elapsedUnits = 0;
+  nodeTextOverlay.segmentIndex = 0;
+  nodeTextOverlay.nextSegmentAtMs =
+    now + nodeTextUnitsToMs(nodeTextOverlay.segments[0].units, nodeTextOverlay.beatIntervalMs);
+  nodeTextOverlay.outputLit = nodeTextOverlay.segments[0].on;
+  resetFlashBurst();
+  renderer.showTemporaryLit(nodeTextOverlay.outputLit);
+  Serial.printf("TEXT: start revision=%lu\n",
+                static_cast<unsigned long>(nodeTextOverlay.revision));
+}
+
+bool serviceNodeTextOverlay(uint32_t now) {
+  if (!nodeTextOverlay.active) {
+    return false;
+  }
+
+  while (nodeTextOverlay.segmentIndex < nodeTextOverlay.segmentCount &&
+         (int32_t)(now - nodeTextOverlay.nextSegmentAtMs) >= 0) {
+    nodeTextOverlay.elapsedUnits += nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].units;
+    nodeTextOverlay.segmentIndex++;
+    if (nodeTextOverlay.segmentIndex < nodeTextOverlay.segmentCount) {
+      nodeTextOverlay.nextSegmentAtMs =
+        nodeTextOverlay.startedAtMs +
+        nodeTextUnitsToMs(
+          nodeTextOverlay.elapsedUnits +
+            nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].units,
+          nodeTextOverlay.beatIntervalMs
+        );
+    }
+  }
+
+  if (nodeTextOverlay.segmentIndex >= nodeTextOverlay.segmentCount) {
+    clearNodeTextOverlay();
+    Serial.printf("TEXT: done revision=%lu\n",
+                  static_cast<unsigned long>(lastNodeTextRevision));
+    return false;
+  }
+
+  const bool nextLit = nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].on;
+  if (nextLit != nodeTextOverlay.outputLit) {
+    renderer.showTemporaryLit(nextLit);
+    nodeTextOverlay.outputLit = nextLit;
+  }
+
+  return true;
 }
 
 void refreshFlashRenderCommandForBar(uint32_t bar) {
@@ -790,6 +1044,7 @@ void switchNodeKind(NodeKind nodeKind, bool persist) {
   }
 
   const bool brainOwned = isBrainOwned(runMode);
+  clearNodeTextOverlay();
   configureNodeProfile(nodeKind, effectiveRole);
   if (previousKind != nodeIdentity.nodeKind ||
       previousRole != nodeIdentity.nodeEffect) {
@@ -827,6 +1082,7 @@ void switchNodeRole(NodeRole nodeRole, bool persist) {
 
   const bool brainOwned = isBrainOwned(runMode);
   const NodeRole previousRole = nodeIdentity.nodeEffect;
+  clearNodeTextOverlay();
   configureNodeProfile(nodeIdentity.nodeKind, nodeRole);
   if (previousRole != nodeIdentity.nodeEffect) {
     bumpNodeProfileRevision();
@@ -888,6 +1144,13 @@ void stageIncomingBrainHello(const BrainHelloMessage& message) {
   portEXIT_CRITICAL(&radioMux);
 }
 
+void stageIncomingNodeText(const NodeTextMessage& message) {
+  portENTER_CRITICAL(&radioMux);
+  pendingNodeTextMessage = message;
+  hasPendingNodeText = true;
+  portEXIT_CRITICAL(&radioMux);
+}
+
 void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
   (void)mac;
 
@@ -939,11 +1202,23 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
       return;
     }
     stageIncomingBrainHello(message);
+    return;
+  }
+
+  if (header.type == decaflash::protocol::MessageType::NodeText &&
+      len == static_cast<int>(sizeof(NodeTextMessage))) {
+    NodeTextMessage message = {};
+    memcpy(&message, data, sizeof(message));
+    if (!isValidHeader(message.header, decaflash::protocol::MessageType::NodeText)) {
+      return;
+    }
+    stageIncomingNodeText(message);
   }
 }
 
 void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
   (void)message;
+  clearNodeTextOverlay();
   runBrainConnectSequence();
 
   if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
@@ -1001,6 +1276,33 @@ void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
                 nodeRoleName(nodeIdentity.nodeEffect),
                 static_cast<unsigned>(currentBpmValue()));
   sendNodeStatus("remote_rgb");
+}
+
+void processPendingNodeTextMessage(const NodeTextMessage& message) {
+  if (message.targetNodeKind != nodeIdentity.nodeKind) {
+    return;
+  }
+
+  if (message.textRevision == lastNodeTextRevision) {
+    return;
+  }
+
+  lastNodeTextRevision = message.textRevision;
+
+  if ((message.flags & decaflash::protocol::kNodeTextFlagCancel) != 0U) {
+    clearNodeTextOverlay();
+    Serial.printf("TEXT: cancel revision=%lu\n",
+                  static_cast<unsigned long>(message.textRevision));
+    return;
+  }
+
+  if (runMode != RunMode::BrainRunning) {
+    Serial.printf("TEXT: ignore waiting_for_clock revision=%lu\n",
+                  static_cast<unsigned long>(message.textRevision));
+    return;
+  }
+
+  queueNodeTextOverlay(message);
 }
 
 ClockSyncDiagnostics analyzeClockSync(
@@ -1080,10 +1382,12 @@ void processPendingRadio() {
   bool hadRgbCommand = false;
   bool hadClockSync = false;
   bool hadBrainHello = false;
+  bool hadNodeText = false;
   FlashCommandMessage flashCommandMessage = {};
   RgbCommandMessage rgbCommandMessage = {};
   ClockSyncMessage clockMessage = {};
   BrainHelloMessage brainHelloMessage = {};
+  NodeTextMessage nodeTextMessage = {};
 
   portENTER_CRITICAL(&radioMux);
   if (hasPendingFlashCommand) {
@@ -1106,6 +1410,11 @@ void processPendingRadio() {
     hasPendingBrainHello = false;
     hadBrainHello = true;
   }
+  if (hasPendingNodeText) {
+    nodeTextMessage = pendingNodeTextMessage;
+    hasPendingNodeText = false;
+    hadNodeText = true;
+  }
   portEXIT_CRITICAL(&radioMux);
 
   if (hadBrainHello) {
@@ -1122,6 +1431,10 @@ void processPendingRadio() {
 
   if (hadClockSync) {
     applyClockSync(clockMessage);
+  }
+
+  if (hadNodeText) {
+    processPendingNodeTextMessage(nodeTextMessage);
   }
 }
 
@@ -1193,6 +1506,7 @@ void serviceButton() {
       Serial.println("BUTTON: long_press");
       if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
         outputMuted = true;
+        clearNodeTextOverlay();
         resetFlashBurst();
         renderer.allOff();
       } else {
@@ -1272,8 +1586,9 @@ void onBeat() {
   lastRenderedBeatInBar = beatInBar;
   lastRenderedBar = currentBar;
   renderer.syncBeatClock(now, beatIntervalMs, beatsPerBar, beatInBar, currentBar);
+  startPendingNodeTextOverlay(now);
 
-  if (!outputMuted) {
+  if (!outputMuted && !nodeTextOverlay.active) {
     if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
       refreshFlashRenderCommandForBar(currentBar);
       const bool trigger = isTriggerBeat(
@@ -1343,6 +1658,10 @@ void serviceClock() {
 
 void serviceOutput() {
   if (outputMuted) {
+    return;
+  }
+
+  if (serviceNodeTextOverlay(millis())) {
     return;
   }
 

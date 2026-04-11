@@ -7,6 +7,7 @@
 #include <cstdlib>
 
 #include "api_client.h"
+#include "node_text_channel.h"
 #include "pdm_microphone.h"
 #include "sync_debug.h"
 #include "text_playback.h"
@@ -54,16 +55,19 @@ void handleCommand(const char* commandLine) {
   }
 
   if (strcmp(commandLine, "text") == 0) {
+    decaflash::brain::node_text::start("HALLO");
     decaflash::brain::text_playback::start("HALLO");
     return;
   }
 
   if (strcmp(commandLine, "text clear") == 0 || strcmp(commandLine, "text stop") == 0) {
+    decaflash::brain::node_text::stop();
     decaflash::brain::text_playback::stop();
     return;
   }
 
   if (strncmp(commandLine, "text ", 5) == 0) {
+    decaflash::brain::node_text::start(commandLine + 5);
     decaflash::brain::text_playback::start(commandLine + 5);
     return;
   }

@@ -12,6 +12,7 @@
 #include "brain_shell.h"
 #include "ai_mode.h"
 #include "api_client.h"
+#include "node_text_channel.h"
 #include "sync_debug.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
@@ -30,6 +31,7 @@ using decaflash::espnow_transport::isValidHeader;
 using decaflash::protocol::makeBrainHelloMessage;
 using decaflash::protocol::makeClockSyncMessage;
 using decaflash::protocol::makeFlashCommandMessage;
+using decaflash::protocol::makeNodeTextMessage;
 using decaflash::protocol::makeRgbCommandMessage;
 using decaflash::protocol::NodeStatusMessage;
 
@@ -93,6 +95,10 @@ bool espNowBlockedByChannel = false;
 bool espNowRecoveryRequested = false;
 const char* espNowRecoveryReason = "startup";
 uint32_t lastEspNowRecoveryAtMs = 0;
+uint32_t nodeTextRevision = 1;
+bool nodeTextChannelActive = false;
+decaflash::brain::text_playback::Owner nodeTextChannelOwner =
+  decaflash::brain::text_playback::Owner::Manual;
 
 struct TrackedNode {
   bool active = false;
@@ -408,6 +414,104 @@ void requestEspNowRecovery(const char* reason) {
   espNowRecoveryRequested = true;
   espNowRecoveryReason = reason;
 }
+
+namespace {
+
+bool prepareNodeText(const char* rawText, char* buffer, size_t bufferLength) {
+  if (rawText == nullptr || buffer == nullptr || bufferLength == 0) {
+    return false;
+  }
+
+  while (*rawText == ' ') {
+    rawText++;
+  }
+
+  size_t length = 0;
+  while (rawText[length] != '\0' &&
+         rawText[length] != '\r' &&
+         rawText[length] != '\n' &&
+         (length + 1U) < bufferLength) {
+    buffer[length] = rawText[length];
+    length++;
+  }
+
+  buffer[length] = '\0';
+  return length > 0;
+}
+
+bool sendNodeText(decaflash::NodeKind targetNodeKind, const char* text, uint8_t flags) {
+  const auto message = makeNodeTextMessage(targetNodeKind, nodeTextRevision, text, flags);
+  const auto result = esp_now_send(
+    decaflash::espnow_transport::kBroadcastMac,
+    reinterpret_cast<const uint8_t*>(&message),
+    sizeof(message)
+  );
+
+  if (result == ESP_OK) {
+    return true;
+  }
+
+  if (result == ESP_ERR_ESPNOW_NOT_INIT) {
+    requestEspNowRecovery("node_text_not_init");
+  }
+
+  Serial.printf("SEND: node_text result=%d kind=%s flags=%u\n",
+                result,
+                nodeKindName(targetNodeKind),
+                static_cast<unsigned>(flags));
+  return false;
+}
+
+}  // namespace
+
+namespace decaflash::brain::node_text {
+
+bool start(const char* text, text_playback::Owner owner) {
+  if (!brainLive || !espNowReady || decaflash::brain::api_client::radioPauseActive()) {
+    return false;
+  }
+
+  char buffer[decaflash::protocol::kNodeTextLength] = {};
+  if (!prepareNodeText(text, buffer, sizeof(buffer))) {
+    return false;
+  }
+
+  const uint32_t revision = ++nodeTextRevision;
+  (void)revision;
+  const bool sentFlash = sendNodeText(decaflash::NodeKind::Flashlight, buffer, 0);
+  const bool sentRgb = sendNodeText(decaflash::NodeKind::RgbStrip, buffer, 0);
+  nodeTextChannelActive = sentFlash || sentRgb;
+  nodeTextChannelOwner = owner;
+  return nodeTextChannelActive;
+}
+
+void stop() {
+  nodeTextChannelActive = false;
+
+  if (!brainLive || !espNowReady || decaflash::brain::api_client::radioPauseActive()) {
+    return;
+  }
+
+  ++nodeTextRevision;
+  (void)sendNodeText(decaflash::NodeKind::Flashlight,
+                     "",
+                     decaflash::protocol::kNodeTextFlagCancel);
+  (void)sendNodeText(decaflash::NodeKind::RgbStrip,
+                     "",
+                     decaflash::protocol::kNodeTextFlagCancel);
+}
+
+bool stopAiOwned() {
+  if (!nodeTextChannelActive ||
+      nodeTextChannelOwner != text_playback::Owner::Ai) {
+    return false;
+  }
+
+  stop();
+  return true;
+}
+
+}  // namespace decaflash::brain::node_text
 
 void recoverEspNowIfNeeded(uint32_t now) {
   if (espNowBlockedByChannel || !espNowRecoveryRequested) {

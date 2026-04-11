@@ -8,6 +8,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "node_text_channel.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
 
@@ -1035,6 +1036,11 @@ void service(uint32_t now) {
   }
 
   if (shouldStartText) {
+    decaflash::brain::node_text::start(
+      textBuffer,
+      textOwner == CloudJobOwner::Ai
+        ? decaflash::brain::text_playback::Owner::Ai
+        : decaflash::brain::text_playback::Owner::Manual);
     decaflash::brain::text_playback::start(
       textBuffer,
       0,

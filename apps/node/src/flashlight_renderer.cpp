@@ -5,8 +5,18 @@ void FlashlightRenderer::begin() {
   allOff();
 }
 
+void FlashlightRenderer::setOutput(bool lit) {
+  if (lit) {
+    sendFlashPreset(kPresetShort100);
+  } else {
+    digitalWrite(kFlashPin, LOW);
+  }
+
+  outputLit_ = lit;
+}
+
 void FlashlightRenderer::allOff() {
-  digitalWrite(kFlashPin, LOW);
+  setOutput(false);
   delay(8);
 }
 
@@ -15,9 +25,17 @@ void FlashlightRenderer::setCommand(const decaflash::FlashCommand& command) {
 }
 
 void FlashlightRenderer::flash100(uint16_t flashMs) {
-  sendFlashPreset(kPresetShort100);
+  setOutput(true);
   delay(flashMs);
   allOff();
+}
+
+void FlashlightRenderer::setLit(bool lit) {
+  if (lit == outputLit_) {
+    return;
+  }
+
+  setOutput(lit);
 }
 
 void FlashlightRenderer::service(uint32_t now) {

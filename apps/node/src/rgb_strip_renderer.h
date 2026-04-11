@@ -22,6 +22,7 @@ class RgbStripRenderer {
   void setNodeEffect(decaflash::NodeEffect nodeEffect);
   void setCommand(const decaflash::RgbCommand& command);
   void flash100(uint16_t flashMs);
+  void setLit(bool lit);
   void triggerAccent();
   void syncBeatClock(
     uint32_t now,

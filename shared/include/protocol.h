@@ -4,8 +4,9 @@
 
 namespace decaflash::protocol {
 
-static constexpr uint16_t kProtocolVersion = 10;
+static constexpr uint16_t kProtocolVersion = 11;
 static constexpr uint32_t kProtocolMagic = 0x4443464C;  // DCFL
+static constexpr size_t kNodeTextLength = 48;
 
 enum class MessageType : uint8_t {
   FlashCommand = 1,
@@ -13,6 +14,7 @@ enum class MessageType : uint8_t {
   NodeStatus = 3,
   ClockSync = 4,
   BrainHello = 5,
+  NodeText = 6,
 };
 
 struct MessageHeader {
@@ -78,6 +80,19 @@ struct ClockSyncMessage {
 
 struct BrainHelloMessage {
   MessageHeader header;
+};
+
+enum NodeTextFlags : uint8_t {
+  kNodeTextFlagCancel = 1 << 0,
+};
+
+struct NodeTextMessage {
+  MessageHeader header;
+  uint32_t textRevision;
+  NodeKind targetNodeKind;
+  uint8_t flags;
+  uint8_t reserved0[2];
+  char text[kNodeTextLength];
 };
 
 constexpr MessageHeader makeHeader(MessageType type) {
@@ -163,6 +178,31 @@ constexpr BrainHelloMessage makeBrainHelloMessage() {
   return BrainHelloMessage{
     makeHeader(MessageType::BrainHello),
   };
+}
+
+inline NodeTextMessage makeNodeTextMessage(
+  NodeKind targetNodeKind,
+  uint32_t textRevision,
+  const char* text,
+  uint8_t flags = 0
+) {
+  NodeTextMessage message = {};
+  message.header = makeHeader(MessageType::NodeText);
+  message.textRevision = textRevision;
+  message.targetNodeKind = targetNodeKind;
+  message.flags = flags;
+
+  size_t index = 0;
+  while (text != nullptr && text[index] != '\0' && index + 1U < kNodeTextLength) {
+    message.text[index] = text[index];
+    ++index;
+  }
+
+  while (index < kNodeTextLength) {
+    message.text[index++] = '\0';
+  }
+
+  return message;
 }
 
 }  // namespace decaflash::protocol

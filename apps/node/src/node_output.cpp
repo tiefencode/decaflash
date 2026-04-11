@@ -106,6 +106,19 @@ void NodeOutput::flash100(uint16_t flashMs) {
   }
 }
 
+void NodeOutput::showTemporaryLit(bool lit) {
+  switch (nodeKind_) {
+    case decaflash::NodeKind::RgbStrip:
+      rgbStrip_.setLit(lit);
+      break;
+
+    case decaflash::NodeKind::Flashlight:
+    default:
+      flashlight_.setLit(lit);
+      break;
+  }
+}
+
 void NodeOutput::service(uint32_t now) {
   switch (nodeKind_) {
     case decaflash::NodeKind::RgbStrip:
