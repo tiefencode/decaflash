@@ -25,6 +25,7 @@ using decaflash::espnow_transport::isValidHeader;
 using decaflash::protocol::BrainHelloMessage;
 using decaflash::protocol::ClockSyncMessage;
 using decaflash::protocol::FlashCommandMessage;
+using decaflash::protocol::NodeClockSyncTelemetry;
 using decaflash::protocol::RgbCommandMessage;
 using decaflash::protocol::makeNodeStatusMessage;
 using decaflash::node::flashRenderCommandFor;
@@ -151,6 +152,7 @@ RunMode runMode = RunMode::Demo;
 uint32_t lastRemoteCommandRevision = 0;
 uint32_t lastClockRevision = 0;
 uint32_t lastClockBeatSerial = 0;
+NodeClockSyncTelemetry lastClockSyncTelemetry = {};
 uint32_t lastBeatRenderedAtMs = 0;
 uint8_t lastRenderedBeatInBar = 0;
 uint32_t lastRenderedBar = 0;
@@ -166,6 +168,11 @@ ClockSyncMessage pendingClockSyncMessage = {};
 BrainHelloMessage pendingBrainHelloMessage = {};
 
 void onBeat();
+
+struct ClockSyncDiagnostics {
+  int16_t phaseErrorMs = 0;
+  uint8_t flags = 0;
+};
 
 NodeRole defaultRoleFor(NodeKind nodeKind) {
   switch (nodeKind) {
@@ -397,6 +404,38 @@ bool isBrainOwned(RunMode mode) {
   return mode != RunMode::Demo;
 }
 
+int16_t clampPhaseErrorMs(int32_t phaseErrorMs) {
+  if (phaseErrorMs < -32768) {
+    return -32768;
+  }
+
+  if (phaseErrorMs > 32767) {
+    return 32767;
+  }
+
+  return static_cast<int16_t>(phaseErrorMs);
+}
+
+const char* syncModeName(uint8_t flags) {
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagDuplicateBeat) != 0U) {
+    return "duplicate";
+  }
+
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagPredictedBeat) != 0U) {
+    return "predicted";
+  }
+
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagResync) != 0U) {
+    return "resync";
+  }
+
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagMeasured) != 0U) {
+    return "measured";
+  }
+
+  return "waiting";
+}
+
 void logFlashVariationChange(uint32_t bar) {
   (void)bar;
   Serial.printf("FLASH: %s\n", activeFlashRenderCommand.name);
@@ -448,7 +487,8 @@ void sendNodeStatus(const char* reason) {
     currentBpmValue(),
     beatsPerBar,
     currentProgramIndexForStatus(),
-    millis()
+    millis(),
+    lastClockSyncTelemetry
   );
 
   const auto result = esp_now_send(
@@ -457,7 +497,9 @@ void sendNodeStatus(const char* reason) {
     sizeof(message)
   );
 
-  if (result != ESP_OK || strcmp(reason, "heartbeat") != 0) {
+  const bool quietStatusReason =
+    strcmp(reason, "heartbeat") == 0 || strcmp(reason, "clock_sync") == 0;
+  if (result != ESP_OK || !quietStatusReason) {
     Serial.printf("SEND: node_status result=%d reason=%s kind=%s role=%s profile_rev=%u scene=",
                   result,
                   reason,
@@ -516,10 +558,15 @@ void clearButtonGesture() {
   buttonPressedAtMs = 0;
 }
 
+void resetClockSyncTelemetry() {
+  lastClockSyncTelemetry = {};
+}
+
 void enterBrainWaitingMode() {
   runMode = RunMode::BrainWaiting;
   lastClockRevision = 0;
   lastClockBeatSerial = 0;
+  resetClockSyncTelemetry();
   resetBeatRenderHistory();
   clearButtonGesture();
 }
@@ -545,6 +592,7 @@ void resetDemoClockState() {
   lastRemoteCommandRevision = 0;
   lastClockRevision = 0;
   lastClockBeatSerial = 0;
+  resetClockSyncTelemetry();
   clearButtonGesture();
   resetBeatRenderHistory();
   resetFlashBurst();
@@ -681,6 +729,16 @@ void printStatus() {
                 runModeName(runMode),
                 static_cast<unsigned>(currentBpmValue()),
                 static_cast<unsigned>(outputMuted));
+  if (lastClockSyncTelemetry.beatSerial == 0) {
+    Serial.println("SYNC: waiting");
+  } else {
+    Serial.printf("SYNC: beat=%lu bar=%lu beat_in_bar=%u phase_ms=%d mode=%s\n",
+                  static_cast<unsigned long>(lastClockSyncTelemetry.beatSerial),
+                  static_cast<unsigned long>(lastClockSyncTelemetry.currentBar),
+                  static_cast<unsigned>(lastClockSyncTelemetry.beatInBar),
+                  static_cast<int>(lastClockSyncTelemetry.phaseErrorMs),
+                  syncModeName(lastClockSyncTelemetry.flags));
+  }
   if (nodeIdentity.nodeKind == NodeKind::RgbStrip) {
     SurfaceModulationState modulation = {};
     if (renderer.surfaceModulationState(millis(), modulation)) {
@@ -945,6 +1003,40 @@ void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
   sendNodeStatus("remote_rgb");
 }
 
+ClockSyncDiagnostics analyzeClockSync(
+  const ClockSyncMessage& message,
+  uint32_t now,
+  bool wasBrainRunning
+) {
+  ClockSyncDiagnostics diagnostics = {};
+
+  if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
+    diagnostics.phaseErrorMs = clampPhaseErrorMs(
+      static_cast<int32_t>(now) - static_cast<int32_t>(lastBeatRenderedAtMs)
+    );
+    diagnostics.flags =
+      decaflash::protocol::kNodeClockSyncFlagMeasured |
+      decaflash::protocol::kNodeClockSyncFlagDuplicateBeat;
+    return diagnostics;
+  }
+
+  if (wasBrainRunning &&
+      beatIntervalMs != 0 &&
+      message.beatInBar == beatInBar &&
+      message.currentBar == currentBar) {
+    diagnostics.phaseErrorMs = clampPhaseErrorMs(
+      static_cast<int32_t>(now) - static_cast<int32_t>(nextBeatAtMs)
+    );
+    diagnostics.flags =
+      decaflash::protocol::kNodeClockSyncFlagMeasured |
+      decaflash::protocol::kNodeClockSyncFlagPredictedBeat;
+    return diagnostics;
+  }
+
+  diagnostics.flags = decaflash::protocol::kNodeClockSyncFlagResync;
+  return diagnostics;
+}
+
 void applyClockSync(const ClockSyncMessage& message) {
   if (!isBrainOwned(runMode)) {
     return;
@@ -959,11 +1051,20 @@ void applyClockSync(const ClockSyncMessage& message) {
   lastClockBeatSerial = message.beatSerial;
   beatIntervalMs = bpmToIntervalMs(message.bpm);
   beatsPerBar = (message.beatsPerBar == 0) ? DEFAULT_BEATS_PER_BAR : message.beatsPerBar;
+  const bool wasBrainRunning = (runMode == RunMode::BrainRunning);
   runMode = RunMode::BrainRunning;
   const uint32_t now = millis();
+  lastClockSyncTelemetry.clockRevision = message.clockRevision;
+  lastClockSyncTelemetry.beatSerial = message.beatSerial;
+  lastClockSyncTelemetry.currentBar = (message.currentBar == 0) ? 1U : message.currentBar;
+  lastClockSyncTelemetry.beatInBar = (message.beatInBar == 0) ? 1U : message.beatInBar;
+  const ClockSyncDiagnostics diagnostics = analyzeClockSync(message, now, wasBrainRunning);
+  lastClockSyncTelemetry.phaseErrorMs = diagnostics.phaseErrorMs;
+  lastClockSyncTelemetry.flags = diagnostics.flags;
 
   if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
     nextBeatAtMs = now + beatIntervalMs;
+    sendNodeStatus("clock_sync");
     return;
   }
 
@@ -971,6 +1072,7 @@ void applyClockSync(const ClockSyncMessage& message) {
   currentBar = (message.currentBar == 0) ? 1U : message.currentBar;
   onBeat();
   nextBeatAtMs = now + beatIntervalMs;
+  sendNodeStatus("clock_sync");
 }
 
 void processPendingRadio() {

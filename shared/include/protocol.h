@@ -4,7 +4,7 @@
 
 namespace decaflash::protocol {
 
-static constexpr uint16_t kProtocolVersion = 9;
+static constexpr uint16_t kProtocolVersion = 10;
 static constexpr uint32_t kProtocolMagic = 0x4443464C;  // DCFL
 
 enum class MessageType : uint8_t {
@@ -20,6 +20,22 @@ struct MessageHeader {
   uint16_t version;
   MessageType type;
   uint8_t reserved;
+};
+
+enum NodeClockSyncFlags : uint8_t {
+  kNodeClockSyncFlagMeasured = 1 << 0,
+  kNodeClockSyncFlagDuplicateBeat = 1 << 1,
+  kNodeClockSyncFlagPredictedBeat = 1 << 2,
+  kNodeClockSyncFlagResync = 1 << 3,
+};
+
+struct NodeClockSyncTelemetry {
+  uint32_t clockRevision;
+  uint32_t beatSerial;
+  uint32_t currentBar;
+  int16_t phaseErrorMs;
+  uint8_t beatInBar;
+  uint8_t flags;
 };
 
 struct FlashCommandMessage {
@@ -47,6 +63,7 @@ struct NodeStatusMessage {
   uint8_t beatsPerBar;
   uint8_t currentProgramIndex;
   uint32_t uptimeMs;
+  NodeClockSyncTelemetry clockSync;
 };
 
 struct ClockSyncMessage {
@@ -109,7 +126,8 @@ constexpr NodeStatusMessage makeNodeStatusMessage(
   uint16_t currentBpm,
   uint8_t beatsPerBar,
   uint8_t currentProgramIndex,
-  uint32_t uptimeMs
+  uint32_t uptimeMs,
+  NodeClockSyncTelemetry clockSync = {}
 ) {
   return NodeStatusMessage{
     makeHeader(MessageType::NodeStatus),
@@ -118,6 +136,7 @@ constexpr NodeStatusMessage makeNodeStatusMessage(
     beatsPerBar,
     currentProgramIndex,
     uptimeMs,
+    clockSync,
   };
 }
 

@@ -11,6 +11,7 @@
 #include "brain_shell.h"
 #include "ai_mode.h"
 #include "api_client.h"
+#include "sync_debug.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
 
@@ -248,6 +249,86 @@ void printTrackedNode(const TrackedNode& node, const char* eventLabel) {
                 nodeRoleName(node.status.identity.nodeEffect));
 }
 
+size_t activeNodeCount();
+
+const char* nodeSyncModeName(uint8_t flags) {
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagDuplicateBeat) != 0U) {
+    return "duplicate";
+  }
+
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagPredictedBeat) != 0U) {
+    return "predicted";
+  }
+
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagResync) != 0U) {
+    return "resync";
+  }
+
+  if ((flags & decaflash::protocol::kNodeClockSyncFlagMeasured) != 0U) {
+    return "measured";
+  }
+
+  return "waiting";
+}
+
+bool hasClockSyncTelemetry(const NodeStatusMessage& status) {
+  return status.clockSync.beatSerial != 0;
+}
+
+bool clockSyncChanged(const NodeStatusMessage& previousStatus, const NodeStatusMessage& nextStatus) {
+  return previousStatus.clockSync.clockRevision != nextStatus.clockSync.clockRevision ||
+         previousStatus.clockSync.beatSerial != nextStatus.clockSync.beatSerial ||
+         previousStatus.clockSync.currentBar != nextStatus.clockSync.currentBar ||
+         previousStatus.clockSync.beatInBar != nextStatus.clockSync.beatInBar ||
+         previousStatus.clockSync.phaseErrorMs != nextStatus.clockSync.phaseErrorMs ||
+         previousStatus.clockSync.flags != nextStatus.clockSync.flags;
+}
+
+void printTrackedNodeSync(const TrackedNode& node, const char* eventLabel) {
+  char macBuffer[18] = {};
+  formatMac(node.mac, macBuffer, sizeof(macBuffer));
+
+  if (!hasClockSyncTelemetry(node.status)) {
+    Serial.printf("SYNC: %s mac=%s kind=%s role=%s state=waiting\n",
+                  eventLabel,
+                  macBuffer,
+                  nodeKindName(node.status.identity.nodeKind),
+                  nodeRoleName(node.status.identity.nodeEffect));
+    return;
+  }
+
+  Serial.printf("SYNC: %s mac=%s kind=%s role=%s beat=%lu bar=%lu beat_in_bar=%u phase_ms=%d mode=%s\n",
+                eventLabel,
+                macBuffer,
+                nodeKindName(node.status.identity.nodeKind),
+                nodeRoleName(node.status.identity.nodeEffect),
+                static_cast<unsigned long>(node.status.clockSync.beatSerial),
+                static_cast<unsigned long>(node.status.clockSync.currentBar),
+                static_cast<unsigned>(node.status.clockSync.beatInBar),
+                static_cast<int>(node.status.clockSync.phaseErrorMs),
+                nodeSyncModeName(node.status.clockSync.flags));
+}
+
+void printSyncSummary() {
+  const size_t nodeCount = activeNodeCount();
+  Serial.printf("SYNC: summary active_nodes=%u log=%s\n",
+                static_cast<unsigned>(nodeCount),
+                decaflash::brain::sync_debug::autoLogEnabled() ? "on" : "off");
+
+  if (nodeCount == 0) {
+    Serial.println("SYNC: no_active_nodes");
+    return;
+  }
+
+  for (const auto& trackedNode : trackedNodes) {
+    if (!trackedNode.active) {
+      continue;
+    }
+
+    printTrackedNodeSync(trackedNode, "node");
+  }
+}
+
 void processPendingNodeStatuses(uint32_t now) {
   PendingNodeStatusEvent localEvents[kPendingNodeStatusCapacity];
   size_t localEventCount = 0;
@@ -289,6 +370,7 @@ void processPendingNodeStatuses(uint32_t now) {
     }
 
     const bool wasActive = slot->active;
+    const NodeStatusMessage previousStatus = slot->status;
     const bool identityChanged =
       !wasActive ||
       memcmp(slot->mac, event.mac, sizeof(slot->mac)) != 0 ||
@@ -299,6 +381,8 @@ void processPendingNodeStatuses(uint32_t now) {
       wasActive &&
       !identityChanged &&
       event.status.uptimeMs + NODE_RESTART_UPTIME_GRACE_MS < slot->status.uptimeMs;
+    const bool syncChanged =
+      !wasActive || clockSyncChanged(previousStatus, event.status);
 
     slot->active = true;
     memcpy(slot->mac, event.mac, sizeof(slot->mac));
@@ -314,6 +398,10 @@ void processPendingNodeStatuses(uint32_t now) {
     } else if (restarted) {
       printTrackedNode(*slot, "restart");
       pendingCommandRefresh = true;
+    } else if (decaflash::brain::sync_debug::autoLogEnabled() &&
+               hasClockSyncTelemetry(event.status) &&
+               syncChanged) {
+      printTrackedNodeSync(*slot, "update");
     }
   }
 }
@@ -541,7 +629,7 @@ void updateClockFromAudio(uint32_t now) {
     if (audioSyncCandidateCount == 0 ||
         bpmDifference(audioSyncCandidateBpm, targetBpm) > AUDIO_SYNC_CANDIDATE_BPM_TOLERANCE) {
       audioSyncCandidateBpm = targetBpm;
-      audioSyncCandidateCount = 1;
+    audioSyncCandidateCount = 1;
       return;
     }
 
@@ -1054,6 +1142,9 @@ void loop() {
   serviceEspNowState(now);
   processPendingNodeStatuses(now);
   expireTrackedNodes(now);
+  if (decaflash::brain::sync_debug::consumeStatusPrintRequested()) {
+    printSyncSummary();
+  }
 
   if (brainLive && pendingCommandRefresh) {
     sendCurrentCommands();
