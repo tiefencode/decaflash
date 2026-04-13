@@ -155,11 +155,11 @@ struct NodeTextOverlayState {
   bool outputLit = false;
   uint32_t revision = 0;
   uint32_t startedAtMs = 0;
-  uint32_t beatIntervalMs = 0;
-  uint32_t elapsedUnits = 0;
-  uint32_t nextSegmentAtMs = 0;
+  uint32_t nextUnitAtMs = 0;
   size_t segmentCount = 0;
   size_t segmentIndex = 0;
+  uint8_t segmentUnitsRemaining = 0;
+  bool currentUnitStartsOnBeat = false;
   NodeTextSegment segments[kNodeTextSegmentCapacity] = {};
 };
 
@@ -615,8 +615,16 @@ bool buildNodeTextOverlay(const char* text) {
   return nodeTextOverlay.segmentCount > 0;
 }
 
-uint32_t nodeTextUnitsToMs(uint32_t units, uint32_t intervalMs) {
-  return (units * intervalMs) / 2U;
+uint32_t currentBeatIntervalMs() {
+  return (beatIntervalMs == 0U) ? bpmToIntervalMs(BPM) : beatIntervalMs;
+}
+
+uint32_t nodeTextUnitDurationMs(bool startsOnBeat) {
+  const uint32_t intervalMs = currentBeatIntervalMs();
+  const uint32_t firstHalfMs = intervalMs / 2U;
+  const uint32_t secondHalfMs = intervalMs - firstHalfMs;
+  const uint32_t durationMs = startsOnBeat ? firstHalfMs : secondHalfMs;
+  return (durationMs == 0U) ? 1U : durationMs;
 }
 
 void clearNodeTextOverlay(bool clearOutput = true) {
@@ -643,51 +651,25 @@ void queueNodeTextOverlay(const NodeTextMessage& message) {
                 static_cast<unsigned>(nodeTextOverlay.segmentCount));
 }
 
-void startPendingNodeTextOverlay(uint32_t now) {
-  if (!nodeTextOverlay.pending || nodeTextOverlay.segmentCount == 0) {
-    return;
-  }
-
-  nodeTextOverlay.pending = false;
-  nodeTextOverlay.active = true;
-  nodeTextOverlay.startedAtMs = now;
-  nodeTextOverlay.beatIntervalMs = (beatIntervalMs == 0U) ? bpmToIntervalMs(BPM) : beatIntervalMs;
-  nodeTextOverlay.elapsedUnits = 0;
-  nodeTextOverlay.segmentIndex = 0;
-  nodeTextOverlay.nextSegmentAtMs =
-    now + nodeTextUnitsToMs(nodeTextOverlay.segments[0].units, nodeTextOverlay.beatIntervalMs);
-  nodeTextOverlay.outputLit = nodeTextOverlay.segments[0].on;
-  resetFlashBurst();
-  renderer.showTemporaryLit(nodeTextOverlay.outputLit);
-  Serial.printf("TEXT: start revision=%lu\n",
-                static_cast<unsigned long>(nodeTextOverlay.revision));
-}
-
-bool serviceNodeTextOverlay(uint32_t now) {
-  if (!nodeTextOverlay.active) {
+bool advanceNodeTextOverlayBoundary(uint32_t boundaryAtMs, bool nextUnitStartsOnBeat) {
+  if (!nodeTextOverlay.active || nodeTextOverlay.segmentIndex >= nodeTextOverlay.segmentCount) {
     return false;
   }
 
-  while (nodeTextOverlay.segmentIndex < nodeTextOverlay.segmentCount &&
-         (int32_t)(now - nodeTextOverlay.nextSegmentAtMs) >= 0) {
-    nodeTextOverlay.elapsedUnits += nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].units;
+  if (nodeTextOverlay.segmentUnitsRemaining > 0U) {
+    nodeTextOverlay.segmentUnitsRemaining--;
+  }
+
+  while (nodeTextOverlay.segmentUnitsRemaining == 0U) {
     nodeTextOverlay.segmentIndex++;
-    if (nodeTextOverlay.segmentIndex < nodeTextOverlay.segmentCount) {
-      nodeTextOverlay.nextSegmentAtMs =
-        nodeTextOverlay.startedAtMs +
-        nodeTextUnitsToMs(
-          nodeTextOverlay.elapsedUnits +
-            nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].units,
-          nodeTextOverlay.beatIntervalMs
-        );
+    if (nodeTextOverlay.segmentIndex >= nodeTextOverlay.segmentCount) {
+      clearNodeTextOverlay();
+      Serial.printf("TEXT: done revision=%lu\n",
+                    static_cast<unsigned long>(lastNodeTextRevision));
+      return false;
     }
-  }
 
-  if (nodeTextOverlay.segmentIndex >= nodeTextOverlay.segmentCount) {
-    clearNodeTextOverlay();
-    Serial.printf("TEXT: done revision=%lu\n",
-                  static_cast<unsigned long>(lastNodeTextRevision));
-    return false;
+    nodeTextOverlay.segmentUnitsRemaining = nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].units;
   }
 
   const bool nextLit = nodeTextOverlay.segments[nodeTextOverlay.segmentIndex].on;
@@ -696,7 +678,59 @@ bool serviceNodeTextOverlay(uint32_t now) {
     nodeTextOverlay.outputLit = nextLit;
   }
 
+  nodeTextOverlay.currentUnitStartsOnBeat = nextUnitStartsOnBeat;
+  nodeTextOverlay.nextUnitAtMs = boundaryAtMs + nodeTextUnitDurationMs(nextUnitStartsOnBeat);
   return true;
+}
+
+bool startPendingNodeTextOverlay(uint32_t now) {
+  if (!nodeTextOverlay.pending || nodeTextOverlay.segmentCount == 0) {
+    return false;
+  }
+
+  nodeTextOverlay.pending = false;
+  nodeTextOverlay.active = true;
+  nodeTextOverlay.startedAtMs = now;
+  nodeTextOverlay.segmentIndex = 0;
+  nodeTextOverlay.segmentUnitsRemaining = nodeTextOverlay.segments[0].units;
+  nodeTextOverlay.outputLit = nodeTextOverlay.segments[0].on;
+  nodeTextOverlay.currentUnitStartsOnBeat = true;
+  nodeTextOverlay.nextUnitAtMs = now + nodeTextUnitDurationMs(true);
+  resetFlashBurst();
+  renderer.showTemporaryLit(nodeTextOverlay.outputLit);
+  Serial.printf("TEXT: start revision=%lu\n",
+                static_cast<unsigned long>(nodeTextOverlay.revision));
+  return true;
+}
+
+void syncNodeTextOverlayToBeat(uint32_t now, bool startedAtThisBeat) {
+  if (!nodeTextOverlay.active || startedAtThisBeat) {
+    return;
+  }
+
+  if (nodeTextOverlay.currentUnitStartsOnBeat) {
+    nodeTextOverlay.nextUnitAtMs = now + nodeTextUnitDurationMs(true);
+    return;
+  }
+
+  advanceNodeTextOverlayBoundary(now, true);
+}
+
+bool serviceNodeTextOverlay(uint32_t now) {
+  if (!nodeTextOverlay.active) {
+    return false;
+  }
+
+  while (nodeTextOverlay.active && (int32_t)(now - nodeTextOverlay.nextUnitAtMs) >= 0) {
+    if (!advanceNodeTextOverlayBoundary(
+          nodeTextOverlay.nextUnitAtMs,
+          !nodeTextOverlay.currentUnitStartsOnBeat
+        )) {
+      return false;
+    }
+  }
+
+  return nodeTextOverlay.active;
 }
 
 void refreshFlashRenderCommandForBar(uint32_t bar) {
@@ -1586,7 +1620,8 @@ void onBeat() {
   lastRenderedBeatInBar = beatInBar;
   lastRenderedBar = currentBar;
   renderer.syncBeatClock(now, beatIntervalMs, beatsPerBar, beatInBar, currentBar);
-  startPendingNodeTextOverlay(now);
+  const bool startedNodeTextOverlay = startPendingNodeTextOverlay(now);
+  syncNodeTextOverlayToBeat(now, startedNodeTextOverlay);
 
   if (!outputMuted && !nodeTextOverlay.active) {
     if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
