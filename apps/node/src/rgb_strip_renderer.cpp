@@ -8,6 +8,7 @@ static constexpr uint8_t kRgbDataPinPrimary = 26;
 static constexpr uint8_t kRgbDataPinSecondary = 32;
 static constexpr uint8_t kRgbLedCount = 15;
 static constexpr uint16_t kConnectPulseMs = 140;
+static constexpr uint8_t kOverlayWhiteLevel = 128;
 
 CRGB gStripLeds[kRgbLedCount];
 
@@ -390,7 +391,7 @@ void RgbStripRenderer::setLit(bool lit) {
   }
 
   if (lit) {
-    renderSolid(255, 255, 255);
+    renderSolid(kOverlayWhiteLevel, kOverlayWhiteLevel, kOverlayWhiteLevel);
     return;
   }
 
