@@ -37,8 +37,6 @@ using decaflash::protocol::NodeStatusMessage;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
 static constexpr uint32_t COMMAND_REFRESH_MS = 60000;
-static constexpr uint32_t COMMAND_BURST_INTERVAL_MS = 180;
-static constexpr uint8_t COMMAND_BURST_REPEAT_COUNT = 6;
 // Node discovery is event-driven; heartbeats are only a fallback signal.
 // Keep stale time comfortably above the 30s node heartbeat so a missed
 // heartbeat does not turn into a false rediscovery.
@@ -85,8 +83,6 @@ size_t currentSceneIndex = 0;
 uint32_t lastMeterDrawAtMs = 0;
 bool pendingCommandRefresh = false;
 bool pendingClockSync = false;
-uint32_t nextCommandBurstAtMs = 0;
-uint8_t pendingCommandBurstRepeats = 0;
 decaflash::brain::PdmMicrophone microphone;
 portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
 bool buttonPressedLastLoop = false;
@@ -647,11 +643,6 @@ void requestClockSync() {
   pendingClockSync = brainLive;
 }
 
-void startCommandBurst(uint32_t now) {
-  pendingCommandBurstRepeats = COMMAND_BURST_REPEAT_COUNT;
-  nextCommandBurstAtMs = now + COMMAND_BURST_INTERVAL_MS;
-}
-
 void setClockBpm(uint16_t bpm, const char* source) {
   const uint16_t clampedBpm = clampBpm(bpm);
   if (clampedBpm == currentBpm) {
@@ -927,14 +918,6 @@ void sendCurrentCommands() {
   }
 }
 
-void sendCurrentCommandsAndSync(uint32_t now, bool scheduleBurst) {
-  sendCurrentCommands();
-  requestClockSync();
-  if (scheduleBurst) {
-    startCommandBurst(now);
-  }
-}
-
 void sendBrainHello() {
   if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || brainLive) {
     return;
@@ -966,15 +949,14 @@ void showSceneUi() {
 }
 
 void selectNextScene() {
-  const uint32_t now = millis();
   currentSceneIndex = (currentSceneIndex + 1) % kSceneSlots;
   commandRevision++;
   showSceneUi();
-  sendCurrentCommandsAndSync(now, true);
+  sendCurrentCommands();
+  requestClockSync();
 }
 
 void activateBrain() {
-  const uint32_t now = millis();
   brainLive = true;
   pendingCommandRefresh = false;
   resetAudioClockFollow();
@@ -982,11 +964,12 @@ void activateBrain() {
   beatInBar = 1;
   currentBar = 1;
   beatIntervalMs = bpmToIntervalMs(currentBpm);
-  nextBeatAtMs = now + beatIntervalMs;
+  nextBeatAtMs = millis() + beatIntervalMs;
   commandRevision++;
   showSceneUi();
-  sendCurrentCommandsAndSync(now, true);
-  nextSendAtMs = now + COMMAND_REFRESH_MS;
+  sendCurrentCommands();
+  requestClockSync();
+  nextSendAtMs = millis() + COMMAND_REFRESH_MS;
   Serial.printf("BRAIN: live scene=%u bpm=%u\n",
                 static_cast<unsigned>(currentSceneIndex + 1U),
                 static_cast<unsigned>(currentBpm));
@@ -1085,8 +1068,9 @@ void loop() {
   }
 
   if (brainLive && pendingCommandRefresh) {
-    sendCurrentCommandsAndSync(now, true);
+    sendCurrentCommands();
     pendingCommandRefresh = false;
+    requestClockSync();
     nextSendAtMs = now + COMMAND_REFRESH_MS;
   }
 
@@ -1111,16 +1095,9 @@ void loop() {
     nextBeatAtMs += beatIntervalMs;
   }
 
-  if (brainLive &&
-      pendingCommandBurstRepeats > 0 &&
-      (int32_t)(now - nextCommandBurstAtMs) >= 0) {
-    sendCurrentCommandsAndSync(now, false);
-    pendingCommandBurstRepeats--;
-    nextCommandBurstAtMs = now + COMMAND_BURST_INTERVAL_MS;
-  }
-
   if (brainLive && (int32_t)(now - nextSendAtMs) >= 0) {
-    sendCurrentCommandsAndSync(now, false);
+    sendCurrentCommands();
+    requestClockSync();
     nextSendAtMs += COMMAND_REFRESH_MS;
   }
 
