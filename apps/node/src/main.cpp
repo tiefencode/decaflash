@@ -46,6 +46,8 @@ static constexpr char kConfigNodeEffectKey[] = "node_effect";
 static constexpr size_t kSerialLineCapacity = 48;
 static constexpr uint32_t NODE_STATUS_INTERVAL_MS = 30000;
 static constexpr uint32_t FILTER_MONITOR_INTERVAL_MS = 5000;
+static constexpr uint32_t BRAIN_RADIO_SILENCE_MS = 10000;
+static constexpr uint32_t ESPNOW_RECOVERY_INTERVAL_MS = 1000;
 static constexpr int BUTTON_PIN = 39;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static constexpr uint32_t BUTTON_LONG_PRESS_MS = 900;
@@ -117,6 +119,10 @@ Preferences preferences;
 char serialLine[kSerialLineCapacity] = {};
 size_t serialLineLength = 0;
 bool espNowReady = false;
+bool espNowRecoveryRequested = false;
+const char* espNowRecoveryReason = "startup";
+uint32_t lastEspNowRecoveryAtMs = 0;
+uint32_t lastBrainRadioAtMs = 0;
 uint32_t nextStatusAtMs = 0;
 uint32_t nextFilterMonitorAtMs = 0;
 bool outputMuted = false;
@@ -194,6 +200,7 @@ NodeTextMessage pendingNodeTextMessage = {};
 uint32_t lastNodeTextRevision = 0;
 
 void onBeat();
+void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len);
 
 struct ClockSyncDiagnostics {
   int16_t phaseErrorMs = 0;
@@ -765,6 +772,15 @@ uint8_t currentProgramIndexForStatus() {
   return static_cast<uint8_t>(currentProgram > 254 ? 254 : currentProgram);
 }
 
+void requestEspNowRecovery(const char* reason) {
+  espNowRecoveryRequested = true;
+  espNowRecoveryReason = reason;
+}
+
+void noteBrainRadioActivity(uint32_t now) {
+  lastBrainRadioAtMs = now;
+}
+
 void sendNodeStatus(const char* reason) {
   if (!espNowReady) {
     return;
@@ -787,6 +803,9 @@ void sendNodeStatus(const char* reason) {
 
   const bool quietStatusReason =
     strcmp(reason, "heartbeat") == 0 || strcmp(reason, "clock_sync") == 0;
+  if (result == ESP_ERR_ESPNOW_NOT_INIT) {
+    requestEspNowRecovery("node_status_not_init");
+  }
   if (result != ESP_OK || !quietStatusReason) {
     Serial.printf("SEND: node_status result=%d reason=%s kind=%s role=%s profile_rev=%u scene=",
                   result,
@@ -1280,7 +1299,7 @@ void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
 
   applyFlashCommand(message.command);
   lastRemoteCommandRevision = message.commandRevision;
-  enterBrainWaitingMode();
+  runMode = RunMode::BrainRunning;
 
   Serial.printf("BRAIN: flash command=%s role=%s bpm=%u\n",
                 activeFlashCommand.name,
@@ -1303,7 +1322,7 @@ void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
 
   applyRgbCommand(message.command);
   lastRemoteCommandRevision = message.commandRevision;
-  enterBrainWaitingMode();
+  runMode = RunMode::BrainRunning;
 
   Serial.printf("BRAIN: rgb command=%s role=%s bpm=%u\n",
                 activeRgbCommand.name,
@@ -1451,6 +1470,12 @@ void processPendingRadio() {
   }
   portEXIT_CRITICAL(&radioMux);
 
+  const bool hadBrainRadio =
+    hadBrainHello || hadFlashCommand || hadRgbCommand || hadClockSync || hadNodeText;
+  if (hadBrainRadio) {
+    noteBrainRadioActivity(millis());
+  }
+
   if (hadBrainHello) {
     processPendingBrainHelloMessage(brainHelloMessage);
   }
@@ -1484,6 +1509,70 @@ void serviceNodeStatus() {
 
   sendNodeStatus("heartbeat");
   nextStatusAtMs = now + NODE_STATUS_INTERVAL_MS;
+}
+
+void recoverEspNowIfNeeded(uint32_t now) {
+  if (!espNowRecoveryRequested) {
+    return;
+  }
+
+  if ((now - lastEspNowRecoveryAtMs) < ESPNOW_RECOVERY_INTERVAL_MS) {
+    return;
+  }
+
+  lastEspNowRecoveryAtMs = now;
+  const auto recovery = decaflash::espnow_transport::recoverEspNow();
+  espNowReady = recovery.ok();
+
+  if (!espNowReady) {
+    Serial.printf("ESP-NOW: recover_failed reason=%s wifi_init=%d wifi_mode=%d wifi_start=%d wifi_ch=%d deinit=%d init=%d peer=%d\n",
+                  espNowRecoveryReason,
+                  static_cast<int>(recovery.wifiInit),
+                  static_cast<int>(recovery.wifiSetMode),
+                  static_cast<int>(recovery.wifiStart),
+                  static_cast<int>(recovery.wifiSetChannel),
+                  static_cast<int>(recovery.espNowDeinit),
+                  static_cast<int>(recovery.espNowInit),
+                  static_cast<int>(recovery.peer.addPeer));
+    return;
+  }
+
+  const esp_err_t receiveCallbackResult = esp_now_register_recv_cb(onEspNowReceive);
+  if (receiveCallbackResult != ESP_OK) {
+    espNowReady = false;
+    Serial.printf("ESP-NOW: recover_failed reason=%s wifi_init=%d wifi_mode=%d wifi_start=%d wifi_ch=%d deinit=%d init=%d peer=%d recv_cb=%d\n",
+                  espNowRecoveryReason,
+                  static_cast<int>(recovery.wifiInit),
+                  static_cast<int>(recovery.wifiSetMode),
+                  static_cast<int>(recovery.wifiStart),
+                  static_cast<int>(recovery.wifiSetChannel),
+                  static_cast<int>(recovery.espNowDeinit),
+                  static_cast<int>(recovery.espNowInit),
+                  static_cast<int>(recovery.peer.addPeer),
+                  static_cast<int>(receiveCallbackResult));
+    return;
+  }
+
+  espNowRecoveryRequested = false;
+  Serial.printf("ESP-NOW: recovered reason=%s\n", espNowRecoveryReason);
+}
+
+void serviceEspNowState(uint32_t now) {
+  if (!espNowReady && !espNowRecoveryRequested) {
+    requestEspNowRecovery("not_ready");
+  }
+
+  if (isBrainOwned(runMode) &&
+      lastBrainRadioAtMs != 0 &&
+      (now - lastBrainRadioAtMs) >= BRAIN_RADIO_SILENCE_MS &&
+      !espNowRecoveryRequested) {
+    Serial.printf("ESP-NOW: silent recovery mode=%s silence_ms=%lu\n",
+                  runModeName(runMode),
+                  static_cast<unsigned long>(now - lastBrainRadioAtMs));
+    requestEspNowRecovery("brain_silent");
+  }
+
+  recoverEspNowIfNeeded(now);
 }
 
 void serviceFilterMonitor() {
@@ -1680,10 +1769,6 @@ void onBeat() {
 }
 
 void serviceClock() {
-  if (runMode == RunMode::BrainWaiting) {
-    return;
-  }
-
   const uint32_t now = millis();
   while ((int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();
@@ -1851,7 +1936,14 @@ void setup() {
     peerResult = ensureBroadcastPeer();
   }
   espNowReady = initResult.ok() && peerResult.ok();
+  esp_err_t receiveCallbackResult = ESP_ERR_ESPNOW_NOT_INIT;
 
+  if (espNowReady) {
+    receiveCallbackResult = esp_now_register_recv_cb(onEspNowReceive);
+    if (receiveCallbackResult != ESP_OK) {
+      espNowReady = false;
+    }
+  }
   Serial.printf("WIFI: set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
   Serial.printf("WIFI: start=%d\n", static_cast<int>(initResult.wifiStart));
   Serial.printf("WIFI: set_channel=%d\n", static_cast<int>(initResult.wifiSetChannel));
@@ -1859,9 +1951,7 @@ void setup() {
   Serial.printf("ESP-NOW: state=%s\n", espNowReady ? "ok" : "failed");
   Serial.printf("ESP-NOW: peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
   Serial.printf("ESP-NOW: add_peer=%d\n", static_cast<int>(peerResult.addPeer));
-  if (espNowReady) {
-    esp_now_register_recv_cb(onEspNowReceive);
-  }
+  Serial.printf("ESP-NOW: recv_cb=%d\n", static_cast<int>(receiveCallbackResult));
   Serial.println("RUNTIME: demo scene playback + brain assignment receive");
   Serial.println("NODE-STACK: kind+role aware");
   printPrograms();
@@ -1875,6 +1965,7 @@ void setup() {
 }
 
 void loop() {
+  serviceEspNowState(millis());
   serviceSerial();
   processPendingRadio();
   serviceButton();
