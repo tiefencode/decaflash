@@ -13,35 +13,21 @@
 #include "ai_mode.h"
 #include "api_client.h"
 #include "node_text_channel.h"
-#include "sync_debug.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
 
 using decaflash::DeviceType;
-using decaflash::NodeEffect;
-using decaflash::scenes::flashSceneCommandFor;
-using decaflash::scenes::kFlashReference;
-using decaflash::scenes::kPulseReference;
 using decaflash::scenes::kSceneCount;
-using decaflash::scenes::rgbSceneCommandFor;
 using decaflash::scenes::sceneName;
 using decaflash::espnow_transport::ensureBroadcastPeer;
 using decaflash::espnow_transport::initEspNow;
-using decaflash::espnow_transport::isValidHeader;
 using decaflash::protocol::makeBrainHelloMessage;
 using decaflash::protocol::makeClockSyncMessage;
-using decaflash::protocol::makeFlashCommandMessage;
 using decaflash::protocol::makeNodeTextMessage;
-using decaflash::protocol::makeRgbCommandMessage;
-using decaflash::protocol::NodeStatusMessage;
+using decaflash::protocol::makeSceneSelectMessage;
 
 static constexpr DeviceType DEVICE_TYPE = DeviceType::Brain;
-static constexpr uint32_t COMMAND_REFRESH_MS = 60000;
-// Node discovery is event-driven; heartbeats are only a fallback signal.
-// Keep stale time comfortably above the 30s node heartbeat so a missed
-// heartbeat does not turn into a false rediscovery.
-static constexpr uint32_t NODE_STALE_MS = 75000;
-static constexpr uint32_t NODE_RESTART_UPTIME_GRACE_MS = 2000;
+static constexpr uint32_t SCENE_SELECT_REFRESH_MS = 30000;
 static constexpr uint16_t DEFAULT_BPM = 120;
 static constexpr uint8_t BEATS_PER_BAR = 4;
 static constexpr uint16_t BEAT_DOT_FLASH_MS = 140;
@@ -51,23 +37,8 @@ static constexpr uint32_t ESPNOW_RECOVERY_INTERVAL_MS = 1000;
 static constexpr uint16_t MIN_BPM = 60;
 static constexpr uint16_t MAX_BPM = 180;
 static constexpr size_t kSceneSlots = kSceneCount;
-static constexpr size_t kTrackedNodeCapacity = 8;
-static constexpr size_t kPendingNodeStatusCapacity = 6;
-static constexpr NodeEffect kFlashEffects[] = {
-  NodeEffect::Pulse,
-};
-static constexpr NodeEffect kRgbEffects[] = {
-  NodeEffect::Wash,
-  NodeEffect::Pulse,
-  NodeEffect::Accent,
-  NodeEffect::Flicker,
-};
-uint32_t nextSendAtMs = 0;
 bool espNowReady = false;
 bool brainLive = false;
-uint32_t commandRevision = 1;
-uint32_t clockRevision = 1;
-uint32_t beatSerial = 0;
 uint16_t currentBpm = DEFAULT_BPM;
 uint32_t beatIntervalMs = 0;
 uint32_t nextBeatAtMs = 0;
@@ -81,10 +52,8 @@ uint32_t beatDotColorOverride = 0;
 bool syncBeatDotPending = false;
 size_t currentSceneIndex = 0;
 uint32_t lastMeterDrawAtMs = 0;
-bool pendingCommandRefresh = false;
 bool pendingClockSync = false;
 decaflash::brain::PdmMicrophone microphone;
-portMUX_TYPE nodeStatusMux = portMUX_INITIALIZER_UNLOCKED;
 bool buttonPressedLastLoop = false;
 bool buttonLongPressHandled = false;
 uint32_t buttonPressedAtMs = 0;
@@ -95,26 +64,11 @@ bool espNowBlockedByChannel = false;
 bool espNowRecoveryRequested = false;
 const char* espNowRecoveryReason = "startup";
 uint32_t lastEspNowRecoveryAtMs = 0;
-uint32_t nodeTextRevision = 1;
 bool nodeTextChannelActive = false;
 decaflash::brain::text_playback::Owner nodeTextChannelOwner =
   decaflash::brain::text_playback::Owner::Manual;
 
-struct TrackedNode {
-  bool active = false;
-  uint8_t mac[6] = {};
-  NodeStatusMessage status = {};
-  uint32_t lastSeenAtMs = 0;
-};
-
-struct PendingNodeStatusEvent {
-  bool ready = false;
-  uint8_t mac[6] = {};
-  NodeStatusMessage status = {};
-};
-
-TrackedNode trackedNodes[kTrackedNodeCapacity];
-PendingNodeStatusEvent pendingNodeStatuses[kPendingNodeStatusCapacity];
+uint32_t nextSceneSelectAtMs = 0;
 
 uint32_t bpmToIntervalMs(uint16_t bpm) {
   return 60000UL / bpm;
@@ -141,272 +95,6 @@ const char* nodeKindName(decaflash::NodeKind nodeKind) {
     default:
       return "flash";
   }
-}
-
-const char* nodeRoleName(decaflash::NodeEffect nodeEffect) {
-  switch (nodeEffect) {
-    case decaflash::NodeEffect::Wash:
-      return "wash";
-
-    case decaflash::NodeEffect::Pulse:
-      return "pulse";
-
-    case decaflash::NodeEffect::Accent:
-      return "accent";
-
-    case decaflash::NodeEffect::Flicker:
-      return "flicker";
-
-    case decaflash::NodeEffect::None:
-    default:
-      return "none";
-  }
-}
-
-void formatMac(const uint8_t* mac, char* buffer, size_t bufferLength) {
-  snprintf(buffer,
-           bufferLength,
-           "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0],
-           mac[1],
-           mac[2],
-           mac[3],
-           mac[4],
-           mac[5]);
-}
-
-void queueNodeStatus(const uint8_t* mac, const NodeStatusMessage& status) {
-  portENTER_CRITICAL(&nodeStatusMux);
-  size_t slotIndex = 0;
-  bool foundFreeSlot = false;
-
-  for (size_t i = 0; i < kPendingNodeStatusCapacity; ++i) {
-    if (!pendingNodeStatuses[i].ready) {
-      slotIndex = i;
-      foundFreeSlot = true;
-      break;
-    }
-  }
-
-  if (!foundFreeSlot) {
-    slotIndex = 0;
-  }
-
-  pendingNodeStatuses[slotIndex].ready = true;
-  memcpy(pendingNodeStatuses[slotIndex].mac, mac, sizeof(pendingNodeStatuses[slotIndex].mac));
-  pendingNodeStatuses[slotIndex].status = status;
-  portEXIT_CRITICAL(&nodeStatusMux);
-}
-
-void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
-  if (len != static_cast<int>(sizeof(NodeStatusMessage))) {
-    return;
-  }
-
-  NodeStatusMessage status = {};
-  memcpy(&status, data, sizeof(status));
-  if (!isValidHeader(status.header, decaflash::protocol::MessageType::NodeStatus)) {
-    return;
-  }
-
-  queueNodeStatus(mac, status);
-}
-
-esp_err_t registerEspNowReceiveCallback() {
-  return esp_now_register_recv_cb(onEspNowReceive);
-}
-
-void printTrackedNode(const TrackedNode& node, const char* eventLabel) {
-  char macBuffer[18] = {};
-  formatMac(node.mac, macBuffer, sizeof(macBuffer));
-
-  Serial.printf("NODE: %s mac=%s kind=%s role=%s\n",
-                eventLabel,
-                macBuffer,
-                nodeKindName(node.status.identity.nodeKind),
-                nodeRoleName(node.status.identity.nodeEffect));
-}
-
-size_t activeNodeCount();
-
-const char* nodeSyncModeName(uint8_t flags) {
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagDuplicateBeat) != 0U) {
-    return "duplicate";
-  }
-
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagPredictedBeat) != 0U) {
-    return "predicted";
-  }
-
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagResync) != 0U) {
-    return "resync";
-  }
-
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagMeasured) != 0U) {
-    return "measured";
-  }
-
-  return "waiting";
-}
-
-bool hasClockSyncTelemetry(const NodeStatusMessage& status) {
-  return status.clockSync.beatSerial != 0;
-}
-
-bool clockSyncChanged(const NodeStatusMessage& previousStatus, const NodeStatusMessage& nextStatus) {
-  return previousStatus.clockSync.clockRevision != nextStatus.clockSync.clockRevision ||
-         previousStatus.clockSync.beatSerial != nextStatus.clockSync.beatSerial ||
-         previousStatus.clockSync.currentBar != nextStatus.clockSync.currentBar ||
-         previousStatus.clockSync.beatInBar != nextStatus.clockSync.beatInBar ||
-         previousStatus.clockSync.phaseErrorMs != nextStatus.clockSync.phaseErrorMs ||
-         previousStatus.clockSync.flags != nextStatus.clockSync.flags;
-}
-
-void printTrackedNodeSync(const TrackedNode& node, const char* eventLabel) {
-  char macBuffer[18] = {};
-  formatMac(node.mac, macBuffer, sizeof(macBuffer));
-
-  if (!hasClockSyncTelemetry(node.status)) {
-    Serial.printf("SYNC: %s mac=%s kind=%s role=%s state=waiting\n",
-                  eventLabel,
-                  macBuffer,
-                  nodeKindName(node.status.identity.nodeKind),
-                  nodeRoleName(node.status.identity.nodeEffect));
-    return;
-  }
-
-  Serial.printf("SYNC: %s mac=%s kind=%s role=%s beat=%lu bar=%lu beat_in_bar=%u phase_ms=%d mode=%s\n",
-                eventLabel,
-                macBuffer,
-                nodeKindName(node.status.identity.nodeKind),
-                nodeRoleName(node.status.identity.nodeEffect),
-                static_cast<unsigned long>(node.status.clockSync.beatSerial),
-                static_cast<unsigned long>(node.status.clockSync.currentBar),
-                static_cast<unsigned>(node.status.clockSync.beatInBar),
-                static_cast<int>(node.status.clockSync.phaseErrorMs),
-                nodeSyncModeName(node.status.clockSync.flags));
-}
-
-void printSyncSummary() {
-  const size_t nodeCount = activeNodeCount();
-  Serial.printf("SYNC: summary active_nodes=%u log=%s\n",
-                static_cast<unsigned>(nodeCount),
-                decaflash::brain::sync_debug::autoLogEnabled() ? "on" : "off");
-
-  if (nodeCount == 0) {
-    Serial.println("SYNC: no_active_nodes");
-    return;
-  }
-
-  for (const auto& trackedNode : trackedNodes) {
-    if (!trackedNode.active) {
-      continue;
-    }
-
-    printTrackedNodeSync(trackedNode, "node");
-  }
-}
-
-void processPendingNodeStatuses(uint32_t now) {
-  PendingNodeStatusEvent localEvents[kPendingNodeStatusCapacity];
-  size_t localEventCount = 0;
-
-  portENTER_CRITICAL(&nodeStatusMux);
-  for (size_t i = 0; i < kPendingNodeStatusCapacity; ++i) {
-    if (!pendingNodeStatuses[i].ready) {
-      continue;
-    }
-
-    localEvents[localEventCount++] = pendingNodeStatuses[i];
-    pendingNodeStatuses[i].ready = false;
-  }
-  portEXIT_CRITICAL(&nodeStatusMux);
-
-  for (size_t eventIndex = 0; eventIndex < localEventCount; ++eventIndex) {
-    const auto& event = localEvents[eventIndex];
-    TrackedNode* slot = nullptr;
-    TrackedNode* reusableSlot = nullptr;
-
-    for (auto& trackedNode : trackedNodes) {
-      if (trackedNode.active &&
-          memcmp(trackedNode.mac, event.mac, sizeof(trackedNode.mac)) == 0) {
-        slot = &trackedNode;
-        break;
-      }
-
-      if (!trackedNode.active && reusableSlot == nullptr) {
-        reusableSlot = &trackedNode;
-      }
-    }
-
-    if (slot == nullptr) {
-      slot = reusableSlot;
-    }
-
-    if (slot == nullptr) {
-      slot = &trackedNodes[0];
-    }
-
-    const bool wasActive = slot->active;
-    const NodeStatusMessage previousStatus = slot->status;
-    const bool identityChanged =
-      !wasActive ||
-      memcmp(slot->mac, event.mac, sizeof(slot->mac)) != 0 ||
-      slot->status.identity.nodeKind != event.status.identity.nodeKind ||
-      slot->status.identity.nodeEffect != event.status.identity.nodeEffect ||
-      slot->status.identity.profileRevision != event.status.identity.profileRevision;
-    const bool restarted =
-      wasActive &&
-      !identityChanged &&
-      event.status.uptimeMs + NODE_RESTART_UPTIME_GRACE_MS < slot->status.uptimeMs;
-    const bool syncChanged =
-      !wasActive || clockSyncChanged(previousStatus, event.status);
-
-    slot->active = true;
-    memcpy(slot->mac, event.mac, sizeof(slot->mac));
-    slot->status = event.status;
-    slot->lastSeenAtMs = now;
-
-    if (!wasActive) {
-      printTrackedNode(*slot, "seen");
-      pendingCommandRefresh = true;
-    } else if (identityChanged) {
-      printTrackedNode(*slot, "role");
-      pendingCommandRefresh = true;
-    } else if (restarted) {
-      printTrackedNode(*slot, "restart");
-      pendingCommandRefresh = true;
-    } else if (decaflash::brain::sync_debug::autoLogEnabled() &&
-               hasClockSyncTelemetry(event.status) &&
-               syncChanged) {
-      printTrackedNodeSync(*slot, "update");
-    }
-  }
-}
-
-void expireTrackedNodes(uint32_t now) {
-  for (auto& trackedNode : trackedNodes) {
-    if (!trackedNode.active) {
-      continue;
-    }
-
-    if ((now - trackedNode.lastSeenAtMs) < NODE_STALE_MS) {
-      continue;
-    }
-
-    trackedNode.active = false;
-  }
-}
-
-size_t activeNodeCount() {
-  size_t count = 0;
-  for (const auto& trackedNode : trackedNodes) {
-    if (trackedNode.active) {
-      count++;
-    }
-  }
-
-  return count;
 }
 
 void requestEspNowRecovery(const char* reason) {
@@ -440,7 +128,7 @@ bool prepareNodeText(const char* rawText, char* buffer, size_t bufferLength) {
 }
 
 bool sendNodeText(decaflash::NodeKind targetNodeKind, const char* text, uint8_t flags) {
-  const auto message = makeNodeTextMessage(targetNodeKind, nodeTextRevision, text, flags);
+  const auto message = makeNodeTextMessage(targetNodeKind, text, flags);
   const auto result = esp_now_send(
     decaflash::espnow_transport::kBroadcastMac,
     reinterpret_cast<const uint8_t*>(&message),
@@ -476,8 +164,6 @@ bool start(const char* text, text_playback::Owner owner) {
     return false;
   }
 
-  const uint32_t revision = ++nodeTextRevision;
-  (void)revision;
   const bool sentFlash = sendNodeText(decaflash::NodeKind::Flashlight, buffer, 0);
   const bool sentRgb = sendNodeText(decaflash::NodeKind::RgbStrip, buffer, 0);
   nodeTextChannelActive = sentFlash || sentRgb;
@@ -492,7 +178,6 @@ void stop() {
     return;
   }
 
-  ++nodeTextRevision;
   (void)sendNodeText(decaflash::NodeKind::Flashlight,
                      "",
                      decaflash::protocol::kNodeTextFlagCancel);
@@ -539,24 +224,7 @@ void recoverEspNowIfNeeded(uint32_t now) {
     return;
   }
 
-  const esp_err_t receiveCallbackResult = registerEspNowReceiveCallback();
-  if (receiveCallbackResult != ESP_OK) {
-    espNowReady = false;
-    Serial.printf("ESP-NOW: recover_failed reason=%s wifi_init=%d wifi_mode=%d wifi_start=%d wifi_ch=%d deinit=%d init=%d peer=%d recv_cb=%d\n",
-                  espNowRecoveryReason,
-                  static_cast<int>(recovery.wifiInit),
-                  static_cast<int>(recovery.wifiSetMode),
-                  static_cast<int>(recovery.wifiStart),
-                  static_cast<int>(recovery.wifiSetChannel),
-                  static_cast<int>(recovery.espNowDeinit),
-                  static_cast<int>(recovery.espNowInit),
-                  static_cast<int>(recovery.peer.addPeer),
-                  static_cast<int>(receiveCallbackResult));
-    return;
-  }
-
   espNowRecoveryRequested = false;
-  pendingCommandRefresh = brainLive;
   pendingClockSync = brainLive;
   const uint8_t activeChannel = decaflash::brain::wifi_manager::isConnected()
                                   ? decaflash::brain::wifi_manager::currentChannel()
@@ -570,6 +238,13 @@ void serviceEspNowState(uint32_t now) {
   const bool radioPauseActive = decaflash::brain::api_client::radioPauseActive();
   const bool wifiConnected = decaflash::brain::wifi_manager::isConnected();
   const uint8_t wifiChannel = decaflash::brain::wifi_manager::currentChannel();
+
+  // Cloud uploads own the shared Wi-Fi radio. Keep ESP-NOW completely idle
+  // until the managed Wi-Fi session disconnects and requests one recovery.
+  if (radioPauseActive) {
+    return;
+  }
+
   const bool radioStateChanged =
     wifiConnected != lastWifiConnectedForEspNow ||
     wifiChannel != lastWifiChannelForEspNow;
@@ -592,10 +267,6 @@ void serviceEspNowState(uint32_t now) {
       return;
     }
 
-    if (radioPauseActive && espNowBlockedByChannel) {
-      return;
-    }
-
     if (espNowBlockedByChannel) {
       Serial.printf("ESP-NOW: channel_ok channel=%u\n",
                     static_cast<unsigned>(
@@ -606,8 +277,7 @@ void serviceEspNowState(uint32_t now) {
     requestEspNowRecovery(wifiConnected ? "wifi_state_changed" : "wifi_disconnected");
   }
 
-  if (!radioPauseActive &&
-      !espNowBlockedByChannel &&
+  if (!espNowBlockedByChannel &&
       !espNowReady &&
       !espNowRecoveryRequested) {
     requestEspNowRecovery("not_ready");
@@ -652,7 +322,6 @@ void setClockBpm(uint16_t bpm, const char* source) {
 
   currentBpm = clampedBpm;
   beatIntervalMs = bpmToIntervalMs(currentBpm);
-  clockRevision++;
   (void)source;
   requestClockSync();
 }
@@ -810,8 +479,6 @@ void onBeat() {
       espNowReady &&
       (pendingClockSync || periodicBarSync)) {
     const auto sync = makeClockSyncMessage(
-      clockRevision,
-      ++beatSerial,
       currentBpm,
       BEATS_PER_BAR,
       currentBeat,
@@ -844,17 +511,12 @@ void onBeat() {
   }
 }
 
-void sendFlashCommand(NodeEffect targetNodeEffect, const decaflash::FlashCommand& command) {
+void sendSceneSelect() {
   if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || !brainLive) {
     return;
   }
 
-  const auto message = makeFlashCommandMessage(
-    decaflash::NodeKind::Flashlight,
-    targetNodeEffect,
-    command,
-    commandRevision
-  );
+  const auto message = makeSceneSelectMessage(static_cast<uint8_t>(currentSceneIndex));
 
   const auto result = esp_now_send(
     decaflash::espnow_transport::kBroadcastMac,
@@ -864,62 +526,33 @@ void sendFlashCommand(NodeEffect targetNodeEffect, const decaflash::FlashCommand
 
   if (result != ESP_OK) {
     if (result == ESP_ERR_ESPNOW_NOT_INIT) {
-      requestEspNowRecovery("flash_command_not_init");
+      requestEspNowRecovery("scene_select_not_init");
     }
-    Serial.printf("SEND: flash_command result=%d role=%s scene=%u command=%s\n",
+    Serial.printf("SEND: scene_select result=%d scene=%u name=%s\n",
                   result,
-                  nodeRoleName(targetNodeEffect),
                   static_cast<unsigned>(currentSceneIndex + 1),
-                  message.command.name);
-  }
-}
-
-void sendRgbCommand(NodeEffect targetNodeEffect, const decaflash::RgbCommand& command) {
-  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || !brainLive) {
-    return;
-  }
-
-  const auto message = makeRgbCommandMessage(
-    decaflash::NodeKind::RgbStrip,
-    targetNodeEffect,
-    command,
-    commandRevision
-  );
-
-  const auto result = esp_now_send(
-    decaflash::espnow_transport::kBroadcastMac,
-    reinterpret_cast<const uint8_t*>(&message),
-    sizeof(message)
-  );
-
-  if (result != ESP_OK) {
-    if (result == ESP_ERR_ESPNOW_NOT_INIT) {
-      requestEspNowRecovery("rgb_command_not_init");
-    }
-    Serial.printf("SEND: rgb_command result=%d role=%s scene=%u command=%s\n",
-                  result,
-                  nodeRoleName(targetNodeEffect),
-                  static_cast<unsigned>(currentSceneIndex + 1),
-                  message.command.name);
+                  sceneName(currentSceneIndex));
   }
 }
 
 void sendCurrentCommands() {
-  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || !brainLive) {
+  nextSceneSelectAtMs = millis();
+}
+
+void serviceSceneSelect(uint32_t now) {
+  if (decaflash::brain::api_client::radioPauseActive() ||
+      !espNowReady ||
+      !brainLive ||
+      static_cast<int32_t>(now - nextSceneSelectAtMs) < 0) {
     return;
   }
 
-  for (const auto effect : kFlashEffects) {
-    sendFlashCommand(effect, flashSceneCommandFor(effect, currentSceneIndex));
-  }
-
-  for (const auto effect : kRgbEffects) {
-    sendRgbCommand(effect, rgbSceneCommandFor(effect, currentSceneIndex));
-  }
+  sendSceneSelect();
+  nextSceneSelectAtMs = millis() + SCENE_SELECT_REFRESH_MS;
 }
 
 void sendBrainHello() {
-  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady || brainLive) {
+  if (decaflash::brain::api_client::radioPauseActive() || !espNowReady) {
     return;
   }
 
@@ -950,7 +583,6 @@ void showSceneUi() {
 
 void selectNextScene() {
   currentSceneIndex = (currentSceneIndex + 1) % kSceneSlots;
-  commandRevision++;
   showSceneUi();
   sendCurrentCommands();
   requestClockSync();
@@ -958,18 +590,14 @@ void selectNextScene() {
 
 void activateBrain() {
   brainLive = true;
-  pendingCommandRefresh = false;
   resetAudioClockFollow();
-  beatSerial = 0;
   beatInBar = 1;
   currentBar = 1;
   beatIntervalMs = bpmToIntervalMs(currentBpm);
   nextBeatAtMs = millis() + beatIntervalMs;
-  commandRevision++;
   showSceneUi();
   sendCurrentCommands();
   requestClockSync();
-  nextSendAtMs = millis() + COMMAND_REFRESH_MS;
   Serial.printf("BRAIN: live scene=%u bpm=%u\n",
                 static_cast<unsigned>(currentSceneIndex + 1U),
                 static_cast<unsigned>(currentBpm));
@@ -984,29 +612,13 @@ void setup() {
   Serial.println();
   Serial.println("Decaflash Brain V1");
   Serial.printf("DEVICE: type=%u\n", static_cast<unsigned>(DEVICE_TYPE));
-  const auto message = makeFlashCommandMessage(
-    decaflash::NodeKind::Flashlight,
-    NodeEffect::Pulse,
-    kFlashReference,
-    1
-  );
-  Serial.printf("PROTOCOL: dcfl/v%u\n", message.header.version);
-  Serial.printf("EXAMPLE: command=%s\n", message.command.name);
-  Serial.printf("EXAMPLE: rgb=%s\n", kPulseReference.name);
+  Serial.printf("PROTOCOL: dcfl/v%u\n", decaflash::protocol::kProtocolVersion);
   microphone.begin();
   decaflash::brain::api_client::begin();
 
   const auto initResult = initEspNow();
   const auto peerResult = initResult.ok() ? ensureBroadcastPeer() : decltype(ensureBroadcastPeer()){};
   espNowReady = initResult.ok() && peerResult.ok();
-  esp_err_t receiveCallbackResult = ESP_ERR_ESPNOW_NOT_INIT;
-  if (espNowReady) {
-    receiveCallbackResult = registerEspNowReceiveCallback();
-    if (receiveCallbackResult != ESP_OK) {
-      espNowReady = false;
-    }
-  }
-
   Serial.printf("WIFI: set_mode=%d\n", static_cast<int>(initResult.wifiSetMode));
   Serial.printf("WIFI: start=%d\n", static_cast<int>(initResult.wifiStart));
   Serial.printf("WIFI: set_channel=%d\n", static_cast<int>(initResult.wifiSetChannel));
@@ -1014,7 +626,6 @@ void setup() {
   Serial.printf("ESP-NOW: state=%s\n", espNowReady ? "ok" : "failed");
   Serial.printf("ESP-NOW: peer_exists=%s\n", peerResult.alreadyExisted ? "yes" : "no");
   Serial.printf("ESP-NOW: add_peer=%d\n", static_cast<int>(peerResult.addPeer));
-  Serial.printf("ESP-NOW: recv_cb=%d\n", static_cast<int>(receiveCallbackResult));
   Serial.printf("STARTUP: mode=%s\n", espNowReady ? "silent start" : "startup only");
   Serial.println("BUTTON: press start/next scene");
   decaflash::brain::shell::printHelp();
@@ -1061,18 +672,7 @@ void loop() {
   }
   decaflash::brain::ai_mode::service(now, microphone);
   serviceEspNowState(now);
-  processPendingNodeStatuses(now);
-  expireTrackedNodes(now);
-  if (decaflash::brain::sync_debug::consumeStatusPrintRequested()) {
-    printSyncSummary();
-  }
-
-  if (brainLive && pendingCommandRefresh) {
-    sendCurrentCommands();
-    pendingCommandRefresh = false;
-    requestClockSync();
-    nextSendAtMs = now + COMMAND_REFRESH_MS;
-  }
+  serviceSceneSelect(now);
 
   if (uiFeedbackUntilMs != 0 && (int32_t)(now - uiFeedbackUntilMs) >= 0) {
     uiFeedbackUntilMs = 0;
@@ -1093,12 +693,6 @@ void loop() {
   while (brainLive && (int32_t)(now - nextBeatAtMs) >= 0) {
     onBeat();
     nextBeatAtMs += beatIntervalMs;
-  }
-
-  if (brainLive && (int32_t)(now - nextSendAtMs) >= 0) {
-    sendCurrentCommands();
-    requestClockSync();
-    nextSendAtMs += COMMAND_REFRESH_MS;
   }
 
   updateIdleMatrixUi(now);

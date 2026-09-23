@@ -218,20 +218,16 @@ The node keeps one `activeCommand` in memory and renders that command locally. T
 
 ## Protocol Model
 
-On top of `NodeCommand`, the shared protocol now defines message envelopes in [`protocol.h`](/Users/tiefencode/Projekte/decaflash/shared/include/protocol.h):
+The shared protocol in [`protocol.h`](/Users/tiefencode/Projekte/decaflash/shared/include/protocol.h) has four broadcast messages:
 
 ```cpp
-struct NodeCommandMessage {
+struct SceneSelectMessage {
   MessageHeader header;
-  uint32_t commandRevision;
-  NodeKind targetNodeKind;
-  NodeCommand command;
+  uint8_t sceneIndex;
 };
 
 struct ClockSyncMessage {
   MessageHeader header;
-  uint32_t clockRevision;
-  uint32_t beatSerial;
   uint16_t bpm;
   uint8_t beatsPerBar;
   uint8_t beatInBar;
@@ -239,52 +235,21 @@ struct ClockSyncMessage {
 };
 ```
 
-That lets the brain send two different things:
-
-- `NodeCommandMessage`: what a node should do
-- `ClockSyncMessage`: when the shared musical clock currently is
-
-Example command send:
-
-```cpp
-auto message = makeNodeCommandMessage(
-  NodeKind::Flashlight,
-  kFlashCommands[3],  // Quad Skip
-  1
-);
-```
-
-Example clock send:
-
-```cpp
-auto sync = makeClockSyncMessage(
-  1,    // clock revision
-  42,   // beat serial
-  120,  // bpm
-  4,    // beats per bar
-  1,    // beat in bar
-  8     // current bar
-);
-```
+The Brain and Nodes compile the same scene definitions. `SceneSelectMessage` therefore selects a scene by index; every Node derives its own role-specific output locally. `ClockSyncMessage` carries the current musical clock. `BrainHelloMessage` is a single boot-time greeting, and `NodeTextMessage` sends temporary text to one node type.
 
 ## ESP-NOW Step
 
-The first transport step is now wired in and split cleanly:
+The transport is broadcast-only:
 
-- `brain` sends scene commands on scene changes and occasional refresh
+- `brain` sends one `BrainHelloMessage` when it boots; Nodes that receive it blink three times and pause their local demo as visible feedback
+- `brain` sends `SceneSelectMessage` once on show start or a scene change, then repeats the active scene every 30 seconds
 - `brain` sends `ClockSyncMessage` once per bar
-- `node` applies commands only when the revision changes
-- `node` keeps its local clock running, but regularly re-locks to the brain clock
-- small phase errors are trimmed softly on the next beat instead of always hard-resetting
-- if clock sync disappears for a few seconds, the node falls back to local holdover instead of stopping
+- every Node accepts valid scene and clock messages whether or not it saw `BrainHelloMessage`
+- a Node that starts later adopts the clock on the next `ClockSyncMessage` and the active scene on the next `SceneSelectMessage` (at most 30 seconds later), then follows the Brain like every other Node
+- there are no sessions, revisions, acknowledgements, heartbeats, or Node status messages
 
-This is still intentionally simple:
+Wi-Fi and cloud work still pause ESP-NOW sends because they can change the shared radio channel.
 
-- broadcast only
-- no pairing
-- no acknowledgements
-- hard resync only when the phase is clearly off
-- basic soft trim is in place, smarter smoothing can come later
 
 ## V1 Scope
 

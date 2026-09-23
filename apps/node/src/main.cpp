@@ -24,11 +24,8 @@ using decaflash::espnow_transport::initEspNow;
 using decaflash::espnow_transport::isValidHeader;
 using decaflash::protocol::BrainHelloMessage;
 using decaflash::protocol::ClockSyncMessage;
-using decaflash::protocol::FlashCommandMessage;
-using decaflash::protocol::NodeClockSyncTelemetry;
 using decaflash::protocol::NodeTextMessage;
-using decaflash::protocol::RgbCommandMessage;
-using decaflash::protocol::makeNodeStatusMessage;
+using decaflash::protocol::SceneSelectMessage;
 using decaflash::node::flashRenderCommandFor;
 using decaflash::node::flashSceneCommandFor;
 using decaflash::node::flashVariationEpochFor;
@@ -44,7 +41,6 @@ static constexpr char kConfigNamespace[] = "decaflash";
 static constexpr char kConfigNodeKindKey[] = "node_kind";
 static constexpr char kConfigNodeEffectKey[] = "node_effect";
 static constexpr size_t kSerialLineCapacity = 48;
-static constexpr uint32_t NODE_STATUS_INTERVAL_MS = 30000;
 static constexpr uint32_t FILTER_MONITOR_INTERVAL_MS = 5000;
 static constexpr int BUTTON_PIN = 39;
 static constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
@@ -103,7 +99,6 @@ NodeIdentity nodeIdentity = {
   DEVICE_TYPE,
   DEFAULT_NODE_KIND,
   NodeRole::Pulse,
-  1,
 };
 
 NodeOutput renderer;
@@ -117,7 +112,6 @@ Preferences preferences;
 char serialLine[kSerialLineCapacity] = {};
 size_t serialLineLength = 0;
 bool espNowReady = false;
-uint32_t nextStatusAtMs = 0;
 uint32_t nextFilterMonitorAtMs = 0;
 bool outputMuted = false;
 
@@ -153,7 +147,6 @@ struct NodeTextOverlayState {
   bool pending = false;
   bool active = false;
   bool outputLit = false;
-  uint32_t revision = 0;
   uint32_t startedAtMs = 0;
   uint32_t nextUnitAtMs = 0;
   size_t segmentCount = 0;
@@ -172,33 +165,21 @@ enum class RunMode : uint8_t {
 };
 
 RunMode runMode = RunMode::Demo;
-uint32_t lastRemoteCommandRevision = 0;
-uint32_t lastClockRevision = 0;
-uint32_t lastClockBeatSerial = 0;
-NodeClockSyncTelemetry lastClockSyncTelemetry = {};
 uint32_t lastBeatRenderedAtMs = 0;
 uint8_t lastRenderedBeatInBar = 0;
 uint32_t lastRenderedBar = 0;
 
 portMUX_TYPE radioMux = portMUX_INITIALIZER_UNLOCKED;
-volatile bool hasPendingFlashCommand = false;
-volatile bool hasPendingRgbCommand = false;
+volatile bool hasPendingSceneSelect = false;
 volatile bool hasPendingClockSync = false;
 volatile bool hasPendingBrainHello = false;
 volatile bool hasPendingNodeText = false;
-FlashCommandMessage pendingFlashCommandMessage = {};
-RgbCommandMessage pendingRgbCommandMessage = {};
+SceneSelectMessage pendingSceneSelectMessage = {};
 ClockSyncMessage pendingClockSyncMessage = {};
 BrainHelloMessage pendingBrainHelloMessage = {};
 NodeTextMessage pendingNodeTextMessage = {};
-uint32_t lastNodeTextRevision = 0;
 
 void onBeat();
-
-struct ClockSyncDiagnostics {
-  int16_t phaseErrorMs = 0;
-  uint8_t flags = 0;
-};
 
 NodeRole defaultRoleFor(NodeKind nodeKind) {
   switch (nodeKind) {
@@ -426,10 +407,6 @@ const char* runModeName(RunMode mode) {
   }
 }
 
-bool isBrainOwned(RunMode mode) {
-  return mode != RunMode::Demo;
-}
-
 struct MorseEntry {
   char character;
   const char* pattern;
@@ -491,38 +468,6 @@ const char* morsePatternFor(char character) {
   }
 
   return nullptr;
-}
-
-int16_t clampPhaseErrorMs(int32_t phaseErrorMs) {
-  if (phaseErrorMs < -32768) {
-    return -32768;
-  }
-
-  if (phaseErrorMs > 32767) {
-    return 32767;
-  }
-
-  return static_cast<int16_t>(phaseErrorMs);
-}
-
-const char* syncModeName(uint8_t flags) {
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagDuplicateBeat) != 0U) {
-    return "duplicate";
-  }
-
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagPredictedBeat) != 0U) {
-    return "predicted";
-  }
-
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagResync) != 0U) {
-    return "resync";
-  }
-
-  if ((flags & decaflash::protocol::kNodeClockSyncFlagMeasured) != 0U) {
-    return "measured";
-  }
-
-  return "waiting";
 }
 
 void logFlashVariationChange(uint32_t bar) {
@@ -637,17 +582,14 @@ void clearNodeTextOverlay(bool clearOutput = true) {
 
 void queueNodeTextOverlay(const NodeTextMessage& message) {
   clearNodeTextOverlay();
-  nodeTextOverlay.revision = message.textRevision;
   if (!buildNodeTextOverlay(message.text)) {
-    Serial.printf("TEXT: ignored empty revision=%lu\n",
-                  static_cast<unsigned long>(message.textRevision));
+    Serial.println("TEXT: ignored empty");
     clearNodeTextOverlay(false);
     return;
   }
 
   nodeTextOverlay.pending = true;
-  Serial.printf("TEXT: queued revision=%lu segments=%u\n",
-                static_cast<unsigned long>(nodeTextOverlay.revision),
+  Serial.printf("TEXT: queued segments=%u\n",
                 static_cast<unsigned>(nodeTextOverlay.segmentCount));
 }
 
@@ -664,8 +606,7 @@ bool advanceNodeTextOverlayBoundary(uint32_t boundaryAtMs, bool nextUnitStartsOn
     nodeTextOverlay.segmentIndex++;
     if (nodeTextOverlay.segmentIndex >= nodeTextOverlay.segmentCount) {
       clearNodeTextOverlay();
-      Serial.printf("TEXT: done revision=%lu\n",
-                    static_cast<unsigned long>(lastNodeTextRevision));
+      Serial.println("TEXT: done");
       return false;
     }
 
@@ -698,8 +639,7 @@ bool startPendingNodeTextOverlay(uint32_t now) {
   nodeTextOverlay.nextUnitAtMs = now + nodeTextUnitDurationMs(true);
   resetFlashBurst();
   renderer.showTemporaryLit(nodeTextOverlay.outputLit);
-  Serial.printf("TEXT: start revision=%lu\n",
-                static_cast<unsigned long>(nodeTextOverlay.revision));
+  Serial.println("TEXT: start");
   return true;
 }
 
@@ -750,58 +690,6 @@ void refreshFlashRenderCommandForBar(uint32_t bar) {
   logFlashVariationChange(bar);
 }
 
-void bumpNodeProfileRevision() {
-  nodeIdentity.profileRevision++;
-  if (nodeIdentity.profileRevision == 0) {
-    nodeIdentity.profileRevision = 1;
-  }
-}
-
-uint8_t currentProgramIndexForStatus() {
-  if (isBrainOwned(runMode)) {
-    return 255;
-  }
-
-  return static_cast<uint8_t>(currentProgram > 254 ? 254 : currentProgram);
-}
-
-void sendNodeStatus(const char* reason) {
-  if (!espNowReady) {
-    return;
-  }
-
-  const auto message = makeNodeStatusMessage(
-    nodeIdentity,
-    currentBpmValue(),
-    beatsPerBar,
-    currentProgramIndexForStatus(),
-    millis(),
-    lastClockSyncTelemetry
-  );
-
-  const auto result = esp_now_send(
-    decaflash::espnow_transport::kBroadcastMac,
-    reinterpret_cast<const uint8_t*>(&message),
-    sizeof(message)
-  );
-
-  const bool quietStatusReason =
-    strcmp(reason, "heartbeat") == 0 || strcmp(reason, "clock_sync") == 0;
-  if (result != ESP_OK || !quietStatusReason) {
-    Serial.printf("SEND: node_status result=%d reason=%s kind=%s role=%s profile_rev=%u scene=",
-                  result,
-                  reason,
-                  nodeKindName(nodeIdentity.nodeKind),
-                  nodeRoleName(nodeIdentity.nodeEffect),
-                  static_cast<unsigned>(nodeIdentity.profileRevision));
-    if (message.currentProgramIndex == 255) {
-      Serial.println("brain");
-    } else {
-      Serial.println(static_cast<unsigned>(message.currentProgramIndex + 1U));
-    }
-  }
-}
-
 void refreshProgramSet() {
   currentProgramCount = 0;
 
@@ -846,15 +734,8 @@ void clearButtonGesture() {
   buttonPressedAtMs = 0;
 }
 
-void resetClockSyncTelemetry() {
-  lastClockSyncTelemetry = {};
-}
-
 void enterBrainWaitingMode() {
   runMode = RunMode::BrainWaiting;
-  lastClockRevision = 0;
-  lastClockBeatSerial = 0;
-  resetClockSyncTelemetry();
   resetBeatRenderHistory();
   clearButtonGesture();
 }
@@ -877,10 +758,6 @@ void applyRgbCommand(const RgbCommand& command) {
 
 void resetDemoClockState() {
   runMode = RunMode::Demo;
-  lastRemoteCommandRevision = 0;
-  lastClockRevision = 0;
-  lastClockBeatSerial = 0;
-  resetClockSyncTelemetry();
   clearButtonGesture();
   resetBeatRenderHistory();
   resetFlashBurst();
@@ -929,7 +806,6 @@ void selectProgram(size_t programIndex, bool announce = true) {
     Serial.println("-----");
   }
 
-  sendNodeStatus("scene");
 }
 
 void selectNextProgram() {
@@ -1017,16 +893,10 @@ void printStatus() {
                 runModeName(runMode),
                 static_cast<unsigned>(currentBpmValue()),
                 static_cast<unsigned>(outputMuted));
-  if (lastClockSyncTelemetry.beatSerial == 0) {
-    Serial.println("SYNC: waiting");
-  } else {
-    Serial.printf("SYNC: beat=%lu bar=%lu beat_in_bar=%u phase_ms=%d mode=%s\n",
-                  static_cast<unsigned long>(lastClockSyncTelemetry.beatSerial),
-                  static_cast<unsigned long>(lastClockSyncTelemetry.currentBar),
-                  static_cast<unsigned>(lastClockSyncTelemetry.beatInBar),
-                  static_cast<int>(lastClockSyncTelemetry.phaseErrorMs),
-                  syncModeName(lastClockSyncTelemetry.flags));
-  }
+  Serial.printf("CLOCK: bar=%lu beat=%u/%u\n",
+                static_cast<unsigned long>(currentBar),
+                static_cast<unsigned>(beatInBar),
+                static_cast<unsigned>(beatsPerBar));
   if (nodeIdentity.nodeKind == NodeKind::RgbStrip) {
     SurfaceModulationState modulation = {};
     if (renderer.surfaceModulationState(millis(), modulation)) {
@@ -1068,38 +938,27 @@ void switchNodeKind(NodeKind nodeKind, bool persist) {
     roleCompatible(nodeKind, nodeIdentity.nodeEffect)
       ? nodeIdentity.nodeEffect
       : defaultRoleFor(nodeKind);
-  const NodeKind previousKind = nodeIdentity.nodeKind;
-  const NodeRole previousRole = nodeIdentity.nodeEffect;
-
   if (persist) {
     if (!saveNodeKind(nodeKind) || !saveNodeRole(effectiveRole)) {
       Serial.println("CONFIG: save_failed");
     }
   }
 
-  const bool brainOwned = isBrainOwned(runMode);
+  const bool brainOwned = runMode != RunMode::Demo;
   clearNodeTextOverlay();
   configureNodeProfile(nodeKind, effectiveRole);
-  if (previousKind != nodeIdentity.nodeKind ||
-      previousRole != nodeIdentity.nodeEffect) {
-    bumpNodeProfileRevision();
-  }
   announceNodeProfile();
   printPrograms();
 
   if (brainOwned) {
     if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
-      applyFlashCommand(REMOTE_IDLE_FLASH_COMMAND);
+      applyFlashCommand(flashSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
     } else {
-      applyRgbCommand(REMOTE_IDLE_RGB_COMMAND);
+      applyRgbCommand(rgbSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
     }
-    lastRemoteCommandRevision = 0;
-    enterBrainWaitingMode();
   } else {
     selectProgram(0);
   }
-
-  sendNodeStatus("node_mode");
 }
 
 void switchNodeRole(NodeRole nodeRole, bool persist) {
@@ -1114,24 +973,22 @@ void switchNodeRole(NodeRole nodeRole, bool persist) {
     Serial.println("CONFIG: save_failed");
   }
 
-  const bool brainOwned = isBrainOwned(runMode);
-  const NodeRole previousRole = nodeIdentity.nodeEffect;
+  const bool brainOwned = runMode != RunMode::Demo;
   clearNodeTextOverlay();
   configureNodeProfile(nodeIdentity.nodeKind, nodeRole);
-  if (previousRole != nodeIdentity.nodeEffect) {
-    bumpNodeProfileRevision();
-  }
   renderer.showRoleConfirm(nodeIdentity.nodeEffect);
   announceNodeProfile();
   printPrograms();
 
   if (brainOwned) {
-    lastRemoteCommandRevision = 0;
+    if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+      applyFlashCommand(flashSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
+    } else {
+      applyRgbCommand(rgbSceneCommandFor(nodeIdentity.nodeEffect, currentProgram));
+    }
   } else {
     selectProgram(0);
   }
-
-  sendNodeStatus("node_role");
 }
 
 void cycleNodeRole(bool persist) {
@@ -1150,17 +1007,10 @@ void runBrainConnectSequence() {
   }
 }
 
-void stageIncomingFlashCommand(const FlashCommandMessage& message) {
+void stageIncomingSceneSelect(const SceneSelectMessage& message) {
   portENTER_CRITICAL(&radioMux);
-  pendingFlashCommandMessage = message;
-  hasPendingFlashCommand = true;
-  portEXIT_CRITICAL(&radioMux);
-}
-
-void stageIncomingRgbCommand(const RgbCommandMessage& message) {
-  portENTER_CRITICAL(&radioMux);
-  pendingRgbCommandMessage = message;
-  hasPendingRgbCommand = true;
+  pendingSceneSelectMessage = message;
+  hasPendingSceneSelect = true;
   portEXIT_CRITICAL(&radioMux);
 }
 
@@ -1195,25 +1045,14 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
   decaflash::protocol::MessageHeader header = {};
   memcpy(&header, data, sizeof(header));
 
-  if (header.type == decaflash::protocol::MessageType::FlashCommand &&
-      len == static_cast<int>(sizeof(FlashCommandMessage))) {
-    FlashCommandMessage message = {};
+  if (header.type == decaflash::protocol::MessageType::SceneSelect &&
+      len == static_cast<int>(sizeof(SceneSelectMessage))) {
+    SceneSelectMessage message = {};
     memcpy(&message, data, sizeof(message));
-    if (!isValidHeader(message.header, decaflash::protocol::MessageType::FlashCommand)) {
+    if (!isValidHeader(message.header, decaflash::protocol::MessageType::SceneSelect)) {
       return;
     }
-    stageIncomingFlashCommand(message);
-    return;
-  }
-
-  if (header.type == decaflash::protocol::MessageType::RgbCommand &&
-      len == static_cast<int>(sizeof(RgbCommandMessage))) {
-    RgbCommandMessage message = {};
-    memcpy(&message, data, sizeof(message));
-    if (!isValidHeader(message.header, decaflash::protocol::MessageType::RgbCommand)) {
-      return;
-    }
-    stageIncomingRgbCommand(message);
+    stageIncomingSceneSelect(message);
     return;
   }
 
@@ -1246,7 +1085,9 @@ void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
     if (!isValidHeader(message.header, decaflash::protocol::MessageType::NodeText)) {
       return;
     }
-    stageIncomingNodeText(message);
+    if (message.targetNodeKind == nodeIdentity.nodeKind) {
+      stageIncomingNodeText(message);
+    }
   }
 }
 
@@ -1260,56 +1101,27 @@ void processPendingBrainHelloMessage(const BrainHelloMessage& message) {
   } else {
     applyRgbCommand(REMOTE_IDLE_RGB_COMMAND);
   }
-  lastRemoteCommandRevision = 0;
   enterBrainWaitingMode();
   Serial.println("BRAIN: waiting_for_clock");
-  sendNodeStatus("brain_hello");
 }
 
-void processPendingFlashCommandMessage(const FlashCommandMessage& message) {
-  if (nodeIdentity.nodeKind != NodeKind::Flashlight ||
-      message.targetNodeKind != nodeIdentity.nodeKind ||
-      message.targetNodeEffect != nodeIdentity.nodeEffect) {
+void processPendingSceneSelectMessage(const SceneSelectMessage& message) {
+  if (message.sceneIndex >= kSceneCount || currentProgramCount == 0) {
     return;
   }
 
-  if (isBrainOwned(runMode) &&
-      message.commandRevision == lastRemoteCommandRevision) {
-    return;
+  currentProgram = message.sceneIndex;
+  if (nodeIdentity.nodeKind == NodeKind::Flashlight) {
+    const FlashCommand command = flashSceneCommandFor(nodeIdentity.nodeEffect, currentProgram);
+    if (memcmp(&command, &activeFlashCommand, sizeof(command)) != 0) {
+      applyFlashCommand(command);
+    }
+  } else {
+    const RgbCommand& command = rgbSceneCommandFor(nodeIdentity.nodeEffect, currentProgram);
+    if (memcmp(&command, &activeRgbCommand, sizeof(command)) != 0) {
+      applyRgbCommand(command);
+    }
   }
-
-  applyFlashCommand(message.command);
-  lastRemoteCommandRevision = message.commandRevision;
-  enterBrainWaitingMode();
-
-  Serial.printf("BRAIN: flash command=%s role=%s bpm=%u\n",
-                activeFlashCommand.name,
-                nodeRoleName(nodeIdentity.nodeEffect),
-                static_cast<unsigned>(currentBpmValue()));
-  sendNodeStatus("remote_flash");
-}
-
-void processPendingRgbCommandMessage(const RgbCommandMessage& message) {
-  if (nodeIdentity.nodeKind != NodeKind::RgbStrip ||
-      message.targetNodeKind != nodeIdentity.nodeKind ||
-      message.targetNodeEffect != nodeIdentity.nodeEffect) {
-    return;
-  }
-
-  if (isBrainOwned(runMode) &&
-      message.commandRevision == lastRemoteCommandRevision) {
-    return;
-  }
-
-  applyRgbCommand(message.command);
-  lastRemoteCommandRevision = message.commandRevision;
-  enterBrainWaitingMode();
-
-  Serial.printf("BRAIN: rgb command=%s role=%s bpm=%u\n",
-                activeRgbCommand.name,
-                nodeRoleName(nodeIdentity.nodeEffect),
-                static_cast<unsigned>(currentBpmValue()));
-  sendNodeStatus("remote_rgb");
 }
 
 void processPendingNodeTextMessage(const NodeTextMessage& message) {
@@ -1317,90 +1129,32 @@ void processPendingNodeTextMessage(const NodeTextMessage& message) {
     return;
   }
 
-  if (message.textRevision == lastNodeTextRevision) {
-    return;
-  }
-
-  lastNodeTextRevision = message.textRevision;
-
   if ((message.flags & decaflash::protocol::kNodeTextFlagCancel) != 0U) {
     clearNodeTextOverlay();
-    Serial.printf("TEXT: cancel revision=%lu\n",
-                  static_cast<unsigned long>(message.textRevision));
+    Serial.println("TEXT: cancel");
     return;
   }
 
   if (runMode != RunMode::BrainRunning) {
-    Serial.printf("TEXT: ignore waiting_for_clock revision=%lu\n",
-                  static_cast<unsigned long>(message.textRevision));
+    Serial.println("TEXT: ignore waiting_for_clock");
     return;
   }
 
   queueNodeTextOverlay(message);
 }
 
-ClockSyncDiagnostics analyzeClockSync(
-  const ClockSyncMessage& message,
-  uint32_t now,
-  bool wasBrainRunning
-) {
-  ClockSyncDiagnostics diagnostics = {};
-
-  if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
-    diagnostics.phaseErrorMs = clampPhaseErrorMs(
-      static_cast<int32_t>(now) - static_cast<int32_t>(lastBeatRenderedAtMs)
-    );
-    diagnostics.flags =
-      decaflash::protocol::kNodeClockSyncFlagMeasured |
-      decaflash::protocol::kNodeClockSyncFlagDuplicateBeat;
-    return diagnostics;
-  }
-
-  if (wasBrainRunning &&
-      beatIntervalMs != 0 &&
-      message.beatInBar == beatInBar &&
-      message.currentBar == currentBar) {
-    diagnostics.phaseErrorMs = clampPhaseErrorMs(
-      static_cast<int32_t>(now) - static_cast<int32_t>(nextBeatAtMs)
-    );
-    diagnostics.flags =
-      decaflash::protocol::kNodeClockSyncFlagMeasured |
-      decaflash::protocol::kNodeClockSyncFlagPredictedBeat;
-    return diagnostics;
-  }
-
-  diagnostics.flags = decaflash::protocol::kNodeClockSyncFlagResync;
-  return diagnostics;
-}
-
 void applyClockSync(const ClockSyncMessage& message) {
-  if (!isBrainOwned(runMode)) {
+  if (message.bpm == 0) {
     return;
   }
 
-  if (message.clockRevision == lastClockRevision &&
-      message.beatSerial == lastClockBeatSerial) {
-    return;
-  }
-
-  lastClockRevision = message.clockRevision;
-  lastClockBeatSerial = message.beatSerial;
   beatIntervalMs = bpmToIntervalMs(message.bpm);
   beatsPerBar = (message.beatsPerBar == 0) ? DEFAULT_BEATS_PER_BAR : message.beatsPerBar;
-  const bool wasBrainRunning = (runMode == RunMode::BrainRunning);
   runMode = RunMode::BrainRunning;
   const uint32_t now = millis();
-  lastClockSyncTelemetry.clockRevision = message.clockRevision;
-  lastClockSyncTelemetry.beatSerial = message.beatSerial;
-  lastClockSyncTelemetry.currentBar = (message.currentBar == 0) ? 1U : message.currentBar;
-  lastClockSyncTelemetry.beatInBar = (message.beatInBar == 0) ? 1U : message.beatInBar;
-  const ClockSyncDiagnostics diagnostics = analyzeClockSync(message, now, wasBrainRunning);
-  lastClockSyncTelemetry.phaseErrorMs = diagnostics.phaseErrorMs;
-  lastClockSyncTelemetry.flags = diagnostics.flags;
 
   if (wasSameBeatRenderedRecently(message.beatInBar, message.currentBar, now)) {
     nextBeatAtMs = now + beatIntervalMs;
-    sendNodeStatus("clock_sync");
     return;
   }
 
@@ -1408,31 +1162,23 @@ void applyClockSync(const ClockSyncMessage& message) {
   currentBar = (message.currentBar == 0) ? 1U : message.currentBar;
   onBeat();
   nextBeatAtMs = now + beatIntervalMs;
-  sendNodeStatus("clock_sync");
 }
 
 void processPendingRadio() {
-  bool hadFlashCommand = false;
-  bool hadRgbCommand = false;
+  bool hadSceneSelect = false;
   bool hadClockSync = false;
   bool hadBrainHello = false;
   bool hadNodeText = false;
-  FlashCommandMessage flashCommandMessage = {};
-  RgbCommandMessage rgbCommandMessage = {};
+  SceneSelectMessage sceneSelectMessage = {};
   ClockSyncMessage clockMessage = {};
   BrainHelloMessage brainHelloMessage = {};
   NodeTextMessage nodeTextMessage = {};
 
   portENTER_CRITICAL(&radioMux);
-  if (hasPendingFlashCommand) {
-    flashCommandMessage = pendingFlashCommandMessage;
-    hasPendingFlashCommand = false;
-    hadFlashCommand = true;
-  }
-  if (hasPendingRgbCommand) {
-    rgbCommandMessage = pendingRgbCommandMessage;
-    hasPendingRgbCommand = false;
-    hadRgbCommand = true;
+  if (hasPendingSceneSelect) {
+    sceneSelectMessage = pendingSceneSelectMessage;
+    hasPendingSceneSelect = false;
+    hadSceneSelect = true;
   }
   if (hasPendingClockSync) {
     clockMessage = pendingClockSyncMessage;
@@ -1455,12 +1201,8 @@ void processPendingRadio() {
     processPendingBrainHelloMessage(brainHelloMessage);
   }
 
-  if (hadFlashCommand) {
-    processPendingFlashCommandMessage(flashCommandMessage);
-  }
-
-  if (hadRgbCommand) {
-    processPendingRgbCommandMessage(rgbCommandMessage);
+  if (hadSceneSelect) {
+    processPendingSceneSelectMessage(sceneSelectMessage);
   }
 
   if (hadClockSync) {
@@ -1470,20 +1212,6 @@ void processPendingRadio() {
   if (hadNodeText) {
     processPendingNodeTextMessage(nodeTextMessage);
   }
-}
-
-void serviceNodeStatus() {
-  if (!espNowReady) {
-    return;
-  }
-
-  const uint32_t now = millis();
-  if ((int32_t)(now - nextStatusAtMs) < 0) {
-    return;
-  }
-
-  sendNodeStatus("heartbeat");
-  nextStatusAtMs = now + NODE_STATUS_INTERVAL_MS;
 }
 
 void serviceFilterMonitor() {
@@ -1867,10 +1595,6 @@ void setup() {
   printPrograms();
   printHelp();
   selectProgram(0);
-  if (espNowReady) {
-    sendNodeStatus("boot");
-    nextStatusAtMs = millis() + NODE_STATUS_INTERVAL_MS;
-  }
   nextFilterMonitorAtMs = millis() + FILTER_MONITOR_INTERVAL_MS;
 }
 
@@ -1880,6 +1604,5 @@ void loop() {
   serviceButton();
   serviceClock();
   serviceOutput();
-  serviceNodeStatus();
   serviceFilterMonitor();
 }

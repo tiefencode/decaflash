@@ -9,7 +9,6 @@
 #include "api_client.h"
 #include "node_text_channel.h"
 #include "pdm_microphone.h"
-#include "sync_debug.h"
 #include "text_playback.h"
 #include "wifi_manager.h"
 
@@ -121,23 +120,6 @@ void handleCommand(const char* commandLine) {
     return;
   }
 
-  if (strcmp(commandLine, "sync") == 0 || strcmp(commandLine, "sync status") == 0) {
-    decaflash::brain::sync_debug::requestStatusPrint();
-    return;
-  }
-
-  if (strcmp(commandLine, "sync log on") == 0) {
-    decaflash::brain::sync_debug::setAutoLogEnabled(true);
-    Serial.println("SYNC: log=on");
-    return;
-  }
-
-  if (strcmp(commandLine, "sync log off") == 0) {
-    decaflash::brain::sync_debug::setAutoLogEnabled(false);
-    Serial.println("SYNC: log=off");
-    return;
-  }
-
   Serial.printf("SERIAL: unknown cmd=\"%s\"\n", commandLine);
   printHelp();
 }
@@ -156,9 +138,6 @@ void printHelp() {
   Serial.println("  wifi scan");
   Serial.println("  wifi connect      # may pause ESP-NOW if AP channel != 1");
   Serial.println("  wifi disconnect");
-  Serial.println("  sync status");
-  Serial.println("  sync log on");
-  Serial.println("  sync log off");
 }
 
 void serviceSerialInput() {

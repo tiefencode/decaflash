@@ -346,10 +346,90 @@ inline SceneDefinition makeScene1() {
   };
 }
 
+inline SceneDefinition makeScene2() {
+  // Wiederhergestellt aus dem frueheren gemeinsamen Szenenmodell:
+  // "dynamisch" (Commit 07f4003). Der damalige Breathe-Renderer
+  // existiert nicht mehr; BarWave ist sein heutiges, beatgebundenes
+  // Gegenstueck. Die Farben, Pegel und Taktmuster sind sonst erhalten.
+  constexpr RgbColor kWashPrimary = {0, 40, 120};
+  constexpr RgbColor kWashSecondary = {72, 0, 120};
+  constexpr RgbColor kPulsePrimary = {0, 70, 180};
+  constexpr RgbColor kPulseSecondary = {180, 0, 190};
+  constexpr RgbColor kAccentPrimary = {14, 0, 0};
+  constexpr RgbColor kAccentSecondary = {255, 12, 0};
+  constexpr RgbColor kFlickerPrimary = {0, 96, 210};
+  constexpr RgbColor kFlickerSecondary = {255, 0, 70};
+
+  return {
+    "dynamisch",
+
+    // Das alte Modell verwendete 2er- und 3er-Bursts. Das aktuelle
+    // Variationsprofil bildet diese mit Drive, Double und Quad ab.
+    flashProfileCommand("Drive Flash", 2, 71, 118, 0, 92, 45, 0),
+
+    rgbCommand(
+      "Drive Wash",
+      RgbPattern::BarWave,
+      kWashPrimary,
+      kWashSecondary,
+      14,
+      34,
+      88,
+      1,
+      0,
+      2600,
+      240
+    ),
+
+    rgbCommand(
+      "Drive Pulse",
+      RgbPattern::BeatPulse,
+      kPulsePrimary,
+      kPulseSecondary,
+      16,
+      88,
+      220,
+      1,
+      0,
+      1100,
+      210
+    ),
+
+    rgbCommand(
+      "Drive Accent",
+      RgbPattern::Accent,
+      kAccentPrimary,
+      kAccentSecondary,
+      0,
+      22,
+      255,
+      2,
+      2,
+      1000,
+      170
+    ),
+
+    rgbCommand(
+      "Drive Flicker",
+      RgbPattern::RunnerFlicker,
+      kFlickerPrimary,
+      kFlickerSecondary,
+      12,
+      92,
+      230,
+      1,
+      1,
+      520,
+      110
+    ),
+  };
+}
+
 }  // namespace detail
 
 static const SceneDefinition kScenes[] = {
   detail::makeScene1(),
+  detail::makeScene2(),
 };
 
 static constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
