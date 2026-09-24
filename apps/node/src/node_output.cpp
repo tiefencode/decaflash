@@ -58,9 +58,9 @@ void NodeOutput::showRoleConfirm(decaflash::NodeEffect nodeEffect) {
   statusLed_.showRoleConfirm(nodeEffect);
 }
 
-void NodeOutput::triggerRgbAccent() {
+void NodeOutput::triggerRgbPulseRow() {
   if (nodeKind_ == decaflash::NodeKind::RgbStrip) {
-    rgbStrip_.triggerAccent();
+    rgbStrip_.triggerPulseRow();
   }
 }
 

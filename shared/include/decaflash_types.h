@@ -28,8 +28,8 @@ enum class NodeEffect : uint8_t {
 
 enum class FlashPattern : uint8_t {
   Off = 0,
-  BeatPulse = 1,
-  BarBurst = 2,
+  Pulse = 1,
+  PulseRow = 2,
 };
 
 enum class FlashCommandMode : uint8_t {
@@ -39,10 +39,36 @@ enum class FlashCommandMode : uint8_t {
 
 enum class RgbPattern : uint8_t {
   Off = 0,
-  BarWave = 1,
-  BeatPulse = 2,
-  Accent = 3,
-  RunnerFlicker = 4,
+  Wave = 1,
+  Pulse = 2,
+  PulseRow = 3,
+  Runner = 4,
+  Heartbeat = 5,
+  RiserPulse = 6,
+};
+
+enum class RunnerMotion : uint8_t {
+  Bounce = 0,
+  Loop = 1,
+};
+
+enum class RunnerPresentation : uint8_t {
+  Parallel = 0,
+  Sequence = 1,
+};
+
+static constexpr uint8_t kMaxRunnerBands = 4;
+
+// A runner is made from a few independently positioned colour bands. Width,
+// position and edge are relative to the whole strip, so scene code does not
+// need to know how many LEDs a particular node has.
+struct RgbRunnerBand {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+  uint8_t widthPercent;
+  uint8_t phasePercent;
+  uint8_t edgePercent;
 };
 
 struct FlashCommand {
@@ -50,10 +76,10 @@ struct FlashCommand {
   FlashCommandMode mode;
   uint8_t variationWindowBars;
   uint16_t profileSeed;
-  uint8_t driveWeight;
-  uint8_t heavyWeight;
-  uint8_t doubleWeight;
-  uint8_t quadWeight;
+  uint8_t pulseWeight;
+  uint8_t slowPulseWeight;
+  uint8_t doublePulseWeight;
+  uint8_t quadPulseWeight;
   uint8_t riserWeight;
 };
 
@@ -82,8 +108,18 @@ struct RgbCommand {
   uint8_t peakLevel;
   uint8_t triggerEveryBars;
   uint8_t triggerBeat;
-  uint16_t cycleMs;
-  uint16_t accentDurationMs;
+  uint16_t startOffsetMs;
+  uint16_t durationMs;
+  uint16_t peakHoldMs;
+  uint16_t fadeOutMs;
+  uint8_t waveCycleBeats;
+  uint8_t pulseCount;
+  uint16_t pulseGapMs;
+  uint8_t subsequentPulseLevel;
+  RunnerMotion runnerMotion;
+  RunnerPresentation runnerPresentation;
+  uint8_t runnerBandCount;
+  RgbRunnerBand runnerBands[kMaxRunnerBands];
 };
 
 struct NodeIdentity {

@@ -118,6 +118,15 @@ uint8_t mixLevel(uint8_t from, uint8_t to, uint8_t mix) {
   return static_cast<uint8_t>(value);
 }
 
+bool isScheduledBeat(const decaflash::RgbCommand& command,
+                     uint32_t currentBar,
+                     uint8_t beatInBar) {
+  const uint8_t everyBars = (command.triggerEveryBars == 0U) ? 1U : command.triggerEveryBars;
+  const bool matchingBar = (everyBars <= 1U) || ((currentBar % everyBars) == 0U);
+  const bool matchingBeat = (command.triggerBeat == 0U) || (beatInBar == command.triggerBeat);
+  return matchingBar && matchingBeat;
+}
+
 SurfaceModulationState buildSurfaceModulationState(uint32_t now) {
   static constexpr uint32_t kMacroSwingMs = 300000U;
   SurfaceModulationState state = {};
@@ -134,7 +143,7 @@ SurfaceModulationState buildSurfaceModulationState(uint32_t now) {
   const uint8_t shadowWobble = smoothSegmentNoise8(now, 36000U, 29U);
   state.shadowDepth = mixLevel(
     6U,
-    48U,
+    76U,
     mixLevel(shadowPendulum, shadowWobble, 44U)
   );
 
@@ -142,7 +151,7 @@ SurfaceModulationState buildSurfaceModulationState(uint32_t now) {
   const uint8_t pocketWobble = smoothSegmentNoise8(now + 9000U, 50000U, 31U);
   state.pocketChance = mixLevel(
     2U,
-    15U,
+    30U,
     mixLevel(pocketPendulum, pocketWobble, 36U)
   );
 
@@ -150,7 +159,7 @@ SurfaceModulationState buildSurfaceModulationState(uint32_t now) {
   const uint8_t coolWobble = smoothSegmentNoise8(now + 17000U, 46000U, 41U);
   state.coolShift = mixLevel(
     2U,
-    44U,
+    58U,
     mixLevel(coolPendulum, coolWobble, 32U)
   );
 
@@ -181,73 +190,95 @@ uint8_t pulseCrestMix8(uint8_t phase) {
 }
 
 uint8_t pulseWindow8(uint8_t phase, uint8_t start, uint8_t peak, uint8_t end, uint8_t strength) {
-  if (phase <= start || phase >= end) {
-    return 0U;
-  }
-
-  if (phase < peak) {
-    return scale8(ease8InOutCubic(segmentMix8(phase, start, peak)), strength);
-  }
-
-  return scale8(
-    static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, peak, end))),
-    strength
-  );
+  if (phase <= start || phase >= end) return 0U;
+  if (phase < peak) return scale8(ease8InOutCubic(segmentMix8(phase, start, peak)), strength);
+  return scale8(static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, peak, end))), strength);
 }
 
 uint8_t heartbeatEnvelope8(uint8_t phase) {
   const uint8_t firstHit = pulseWindow8(phase, 8U, 22U, 42U, 255U);
   const uint8_t secondHit = pulseWindow8(phase, 46U, 60U, 88U, 180U);
-  uint8_t tail = 0U;
-  if (phase >= 60U) {
-    tail = scale8(
-      static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 60U, 255U))),
-      88U
-    );
-  }
-
+  const uint8_t tail = (phase < 60U) ? 0U : scale8(
+    static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 60U, 255U))), 88U);
   return max(firstHit, max(secondHit, tail));
 }
 
-uint8_t ledPosition8(uint8_t pixel) {
-  if (kRgbLedCount <= 1U) {
-    return 0U;
-  }
-
-  return static_cast<uint8_t>(
-    (static_cast<uint16_t>(pixel) * 255U) / static_cast<uint16_t>(kRgbLedCount - 1U)
-  );
+uint8_t riserPulseEnvelope8(uint8_t phase) {
+  // Four rising hits at the start of the technical bar, followed by the long
+  // tail of the final hit. This is intentionally a row, not a heartbeat.
+  const uint8_t first = pulseWindow8(phase, 4U, 10U, 18U, 64U);
+  const uint8_t second = pulseWindow8(phase, 26U, 33U, 43U, 128U);
+  const uint8_t third = pulseWindow8(phase, 52U, 60U, 72U, 191U);
+  const uint8_t fourth = pulseWindow8(phase, 82U, 92U, 108U, 255U);
+  const uint8_t tail = (phase < 92U) ? 0U : scale8(
+    static_cast<uint8_t>(255U - ease8InOutCubic(segmentMix8(phase, 92U, 255U))), 168U);
+  return max(first, max(second, max(third, max(fourth, tail))));
 }
 
-uint8_t proximityMix8(uint8_t pixelPosition, uint8_t targetPosition, uint8_t reach) {
-  const uint8_t distance =
-    (pixelPosition > targetPosition) ? (pixelPosition - targetPosition) : (targetPosition - pixelPosition);
-  if (distance >= reach) {
+uint8_t bandLevel8(uint8_t positionPercent,
+                   uint8_t widthPercent,
+                   uint8_t edgePercent) {
+  const uint8_t width = widthPercent > 100U ? 100U : widthPercent;
+  if (width == 0U || positionPercent >= width) {
     return 0U;
   }
 
-  return ease8InOutCubic(
-    static_cast<uint8_t>(255U - ((static_cast<uint16_t>(distance) * 255U) / reach))
-  );
+  // Edges are part of a band's stated width. With edge=0 a band is a hard
+  // block; two 30% bands always leave 40% of the physical strip black.
+  const uint8_t edge = min<uint8_t>(edgePercent, width / 2U);
+  if (edge == 0U || (positionPercent >= edge && positionPercent < width - edge)) {
+    return 255U;
+  }
+
+  if (positionPercent < edge) {
+    return ease8InOutCubic(static_cast<uint8_t>((positionPercent * 255U) / edge));
+  }
+
+  const uint8_t edgeProgress = static_cast<uint8_t>(positionPercent - (width - edge));
+  return static_cast<uint8_t>(255U - ease8InOutCubic(
+    static_cast<uint8_t>((edgeProgress * 255U) / edge)
+  ));
+}
+
+uint8_t centeredBandLevel8(uint8_t distancePercent,
+                           uint8_t widthPercent,
+                           uint8_t edgePercent) {
+  const uint8_t halfWidth = widthPercent / 2U;
+  if (halfWidth == 0U || distancePercent > halfWidth) {
+    return 0U;
+  }
+
+  const uint8_t edge = min<uint8_t>(edgePercent, halfWidth);
+  const uint8_t coreRadius = static_cast<uint8_t>(halfWidth - edge);
+  if (edge == 0U || distancePercent <= coreRadius) {
+    return 255U;
+  }
+
+  const uint8_t edgeProgress = static_cast<uint8_t>(distancePercent - coreRadius);
+  return static_cast<uint8_t>(255U - ease8InOutCubic(
+    static_cast<uint8_t>((edgeProgress * 255U) / edge)
+  ));
 }
 
 WavePhaseLayout barWaveLayout(const decaflash::RgbCommand& command, uint32_t phraseDurationMs) {
-  const uint8_t deepBlueEnd = 96U;
-  const uint8_t lightBlueEnd = 206U;
-  const uint8_t whiteRiseEnd = 228U;
+  const uint8_t requestedFadeWidth = static_cast<uint8_t>(
+    min<uint32_t>(
+      120U,
+      (static_cast<uint32_t>(command.fadeOutMs) * 255UL) / phraseDurationMs
+    )
+  );
   uint8_t whiteHoldWidth = static_cast<uint8_t>(
-    (static_cast<uint32_t>(command.accentDurationMs) * 255UL) / phraseDurationMs
+    (static_cast<uint32_t>(command.peakHoldMs) * 255UL) / phraseDurationMs
   );
   if (whiteHoldWidth > 10U) {
     whiteHoldWidth = 10U;
   }
 
-  return {
-    deepBlueEnd,
-    lightBlueEnd,
-    whiteRiseEnd,
-    static_cast<uint8_t>(whiteRiseEnd + whiteHoldWidth),
-  };
+  const uint8_t fadeWidth = requestedFadeWidth == 0U ? 27U : requestedFadeWidth;
+  const uint8_t whiteRiseEnd = static_cast<uint8_t>(255U - fadeWidth - whiteHoldWidth);
+  const uint8_t deepBlueEnd = static_cast<uint8_t>((static_cast<uint16_t>(whiteRiseEnd) * 42U) / 100U);
+  const uint8_t lightBlueEnd = static_cast<uint8_t>((static_cast<uint16_t>(whiteRiseEnd) * 90U) / 100U);
+  return {deepBlueEnd, lightBlueEnd, whiteRiseEnd, static_cast<uint8_t>(whiteRiseEnd + whiteHoldWidth)};
 }
 
 WavePixelState baseBarWaveState(
@@ -362,16 +393,16 @@ void RgbStripRenderer::allOff() {
 void RgbStripRenderer::setNodeEffect(decaflash::NodeEffect nodeEffect) {
   nodeEffect_ = nodeEffect;
   effectStartedAtMs_ = millis();
-  accentStartedAtMs_ = 0;
-  accentEndsAtMs_ = 0;
+  pulseRowStartedAtMs_ = 0;
+  pulseRowEndsAtMs_ = 0;
   beatStartedAtMs_ = effectStartedAtMs_;
 }
 
 void RgbStripRenderer::setCommand(const decaflash::RgbCommand& command) {
   currentCommand_ = command;
   effectStartedAtMs_ = millis();
-  accentStartedAtMs_ = 0;
-  accentEndsAtMs_ = 0;
+  pulseRowStartedAtMs_ = 0;
+  pulseRowEndsAtMs_ = 0;
   beatStartedAtMs_ = effectStartedAtMs_;
 }
 
@@ -399,12 +430,16 @@ void RgbStripRenderer::setLit(bool lit) {
   FastLED.show();
 }
 
-void RgbStripRenderer::triggerAccent() {
+void RgbStripRenderer::triggerPulseRow() {
   const uint32_t now = millis();
-  accentStartedAtMs_ = now;
-  const uint16_t accentDurationMs =
-    (currentCommand_.accentDurationMs == 0) ? 160 : currentCommand_.accentDurationMs;
-  accentEndsAtMs_ = now + accentDurationMs;
+  const uint8_t pulseCount = (currentCommand_.pulseCount == 0U) ? 1U : currentCommand_.pulseCount;
+  const uint16_t pulseDurationMs =
+    (currentCommand_.durationMs == 0U) ? 80U : currentCommand_.durationMs;
+  const uint32_t rowDurationMs =
+    static_cast<uint32_t>(pulseCount) * pulseDurationMs +
+    static_cast<uint32_t>(pulseCount - 1U) * currentCommand_.pulseGapMs;
+  pulseRowStartedAtMs_ = now + currentCommand_.startOffsetMs;
+  pulseRowEndsAtMs_ = pulseRowStartedAtMs_ + rowDurationMs;
 }
 
 void RgbStripRenderer::syncBeatClock(
@@ -427,20 +462,28 @@ void RgbStripRenderer::service(uint32_t now) {
   }
 
   switch (currentCommand_.pattern) {
-    case decaflash::RgbPattern::BarWave:
-      renderBarWave(now);
+    case decaflash::RgbPattern::Wave:
+      renderWave(now);
       break;
 
-    case decaflash::RgbPattern::BeatPulse:
-      renderBeatPulse(now);
+    case decaflash::RgbPattern::Pulse:
+      renderPulse(now);
       break;
 
-    case decaflash::RgbPattern::Accent:
-      renderAccent(now);
+    case decaflash::RgbPattern::PulseRow:
+      renderPulseRow(now);
       break;
 
-    case decaflash::RgbPattern::RunnerFlicker:
-      renderRunnerFlicker(now);
+    case decaflash::RgbPattern::Heartbeat:
+      renderHeartbeat(now);
+      break;
+
+    case decaflash::RgbPattern::RiserPulse:
+      renderRiserPulse(now);
+      break;
+
+    case decaflash::RgbPattern::Runner:
+      renderRunner(now);
       break;
 
     case decaflash::RgbPattern::Off:
@@ -466,24 +509,26 @@ void RgbStripRenderer::renderSolid(uint8_t red, uint8_t green, uint8_t blue) {
   FastLED.show();
 }
 
-void RgbStripRenderer::renderBarWave(uint32_t now) {
+void RgbStripRenderer::renderWave(uint32_t now) {
   const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
-  const uint8_t phraseBars = (currentCommand_.triggerEveryBars == 0) ? 4U : currentCommand_.triggerEveryBars;
   const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
+  const uint8_t fallbackCycleBeats = static_cast<uint8_t>(
+    ((currentCommand_.triggerEveryBars == 0) ? 1U : currentCommand_.triggerEveryBars) * safeBeatsPerBar
+  );
+  const uint8_t cycleBeats = currentCommand_.waveCycleBeats == 0U
+    ? fallbackCycleBeats : currentCommand_.waveCycleBeats;
   const uint32_t phraseDurationMs =
-    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar) * beatIntervalMs;
+    static_cast<uint32_t>(cycleBeats) * beatIntervalMs;
   const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
   const uint8_t startBeat =
     (currentCommand_.triggerBeat == 0 || currentCommand_.triggerBeat > safeBeatsPerBar)
       ? 1U
       : currentCommand_.triggerBeat;
-  const uint32_t totalPhraseBeats =
-    static_cast<uint32_t>(phraseBars) * static_cast<uint32_t>(safeBeatsPerBar);
   const uint32_t absoluteBeatIndex =
     ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
     static_cast<uint32_t>(safeBeatInBar - 1U);
   const uint32_t phraseBeatIndex =
-    (absoluteBeatIndex + totalPhraseBeats - static_cast<uint32_t>(startBeat - 1U)) % totalPhraseBeats;
+    (absoluteBeatIndex + cycleBeats - static_cast<uint32_t>(startBeat - 1U)) % cycleBeats;
   uint32_t elapsedBeatMs = now - beatStartedAtMs_;
   if (elapsedBeatMs > beatIntervalMs) {
     elapsedBeatMs = beatIntervalMs;
@@ -494,7 +539,8 @@ void RgbStripRenderer::renderBarWave(uint32_t now) {
     elapsedPhraseMs = phraseDurationMs;
   }
 
-  const uint32_t travelMs = (currentCommand_.cycleMs == 0) ? (beatIntervalMs / 2U) : currentCommand_.cycleMs;
+  const uint32_t travelMs =
+    (currentCommand_.durationMs == 0) ? (beatIntervalMs / 2U) : currentCommand_.durationMs;
   const WavePhaseLayout layout = barWaveLayout(currentCommand_, phraseDurationMs);
   const SurfaceModulationState modulation = surfaceModulationState(now);
 
@@ -512,9 +558,16 @@ void RgbStripRenderer::renderBarWave(uint32_t now) {
   }
 }
 
-void RgbStripRenderer::renderBeatPulse(uint32_t now) {
+void RgbStripRenderer::renderPulse(uint32_t now) {
+  if (!isScheduledBeat(currentCommand_, currentBar_, beatInBar_)) {
+    const CRGB idle = scaleColor(primaryColor(currentCommand_), currentCommand_.floorLevel);
+    fill_solid(gStripLeds, kLedCount, idle);
+    return;
+  }
+
   const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
-  uint32_t pulseDurationMs = (currentCommand_.cycleMs == 0) ? beatIntervalMs : currentCommand_.cycleMs;
+  uint32_t pulseDurationMs =
+    (currentCommand_.durationMs == 0) ? beatIntervalMs : currentCommand_.durationMs;
   if (pulseDurationMs > beatIntervalMs) {
     pulseDurationMs = beatIntervalMs;
   }
@@ -523,6 +576,12 @@ void RgbStripRenderer::renderBeatPulse(uint32_t now) {
   }
 
   uint32_t elapsedMs = now - beatStartedAtMs_;
+  if (elapsedMs < currentCommand_.startOffsetMs) {
+    const CRGB idle = scaleColor(primaryColor(currentCommand_), currentCommand_.floorLevel);
+    fill_solid(gStripLeds, kLedCount, idle);
+    return;
+  }
+  elapsedMs -= currentCommand_.startOffsetMs;
   if (elapsedMs > pulseDurationMs) {
     elapsedMs = pulseDurationMs;
   }
@@ -561,103 +620,179 @@ void RgbStripRenderer::renderBeatPulse(uint32_t now) {
   }
 }
 
-void RgbStripRenderer::renderAccent(uint32_t now) {
-  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
-  const uint32_t phraseBeats = 4U;
-  const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
-  const uint8_t startBeat =
-    (currentCommand_.triggerBeat == 0 || currentCommand_.triggerBeat > phraseBeats)
-      ? 1U
-      : currentCommand_.triggerBeat;
-  const uint32_t phraseDurationMs = phraseBeats * beatIntervalMs;
-  const uint32_t totalPhraseBeats = phraseBeats;
+void RgbStripRenderer::renderPulseRow(uint32_t now) {
+  const CRGB idle = scaleColor(primaryColor(currentCommand_), currentCommand_.floorLevel);
+  if (pulseRowStartedAtMs_ == 0 || now < pulseRowStartedAtMs_ || now >= pulseRowEndsAtMs_) {
+    fill_solid(gStripLeds, kLedCount, idle);
+    return;
+  }
+
+  const uint16_t pulseDurationMs =
+    (currentCommand_.durationMs == 0U) ? 80U : currentCommand_.durationMs;
+  const uint32_t elapsedMs = now - pulseRowStartedAtMs_;
+  const uint32_t pulseSlotMs = static_cast<uint32_t>(pulseDurationMs) + currentCommand_.pulseGapMs;
+  const uint8_t pulseIndex = static_cast<uint8_t>(elapsedMs / pulseSlotMs);
+  const uint16_t pulseElapsedMs = static_cast<uint16_t>(elapsedMs % pulseSlotMs);
+  if (pulseIndex >= currentCommand_.pulseCount || pulseElapsedMs >= pulseDurationMs) {
+    fill_solid(gStripLeds, kLedCount, idle);
+    return;
+  }
+
+  const uint8_t phase = static_cast<uint8_t>((static_cast<uint32_t>(pulseElapsedMs) * 255UL) / pulseDurationMs);
+  const uint8_t envelope = classicPulseEnvelope8(phase);
+  const uint8_t pulsePeak =
+    (pulseIndex == 0U)
+      ? currentCommand_.peakLevel
+      : scale8(currentCommand_.peakLevel, currentCommand_.subsequentPulseLevel);
+  const uint8_t level = mixLevel(currentCommand_.floorLevel, pulsePeak, envelope);
+  const CRGB color = blend(
+    primaryColor(currentCommand_),
+    secondaryColor(currentCommand_),
+    envelope
+  );
+  for (uint8_t i = 0; i < kLedCount; ++i) {
+    gStripLeds[i] = scaleColor(color, level);
+  }
+}
+
+void RgbStripRenderer::renderHeartbeat(uint32_t now) {
+  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0U) ? 500U : beatIntervalMs_;
+  const uint8_t safeBeatInBar = (beatInBar_ == 0U) ? 1U : beatInBar_;
+  const uint8_t startBeat = (currentCommand_.triggerBeat == 0U || currentCommand_.triggerBeat > 4U)
+    ? 1U : currentCommand_.triggerBeat;
+  const uint32_t phraseDurationMs = 4U * beatIntervalMs;
   const uint32_t absoluteBeatIndex =
-    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(beatsPerBar_ == 0 ? 4U : beatsPerBar_) +
+    ((currentBar_ == 0U ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(beatsPerBar_ == 0U ? 4U : beatsPerBar_) +
     static_cast<uint32_t>(safeBeatInBar - 1U);
   const uint32_t phraseBeatIndex =
-    (absoluteBeatIndex + totalPhraseBeats - static_cast<uint32_t>(startBeat - 1U)) % totalPhraseBeats;
+    (absoluteBeatIndex + 4U - static_cast<uint32_t>(startBeat - 1U)) % 4U;
   uint32_t elapsedBeatMs = now - beatStartedAtMs_;
-  if (elapsedBeatMs > beatIntervalMs) {
-    elapsedBeatMs = beatIntervalMs;
-  }
-
-  uint32_t elapsedPhraseMs = phraseBeatIndex * beatIntervalMs + elapsedBeatMs;
-  if (elapsedPhraseMs > phraseDurationMs) {
-    elapsedPhraseMs = phraseDurationMs;
-  }
-
+  if (elapsedBeatMs > beatIntervalMs) elapsedBeatMs = beatIntervalMs;
+  const uint32_t elapsedPhraseMs = min(phraseBeatIndex * beatIntervalMs + elapsedBeatMs, phraseDurationMs);
   const uint8_t phase = static_cast<uint8_t>((elapsedPhraseMs * 255UL) / phraseDurationMs);
   const SurfaceModulationState modulation = surfaceModulationState(now);
   const uint8_t envelope = scale8(
     heartbeatEnvelope8(phase),
     mixLevel(190U, 255U, modulation.activity)
   );
-  const uint8_t level = mixLevel(
-    currentCommand_.floorLevel,
-    currentCommand_.peakLevel,
-    envelope
-  );
-  const uint8_t colorMix = scale8(envelope, mixLevel(92U, 148U, modulation.activity));
-  const CRGB pulseColor = blend(
+  const uint8_t level = mixLevel(currentCommand_.floorLevel, currentCommand_.peakLevel, envelope);
+  const CRGB color = blend(
     primaryColor(currentCommand_),
     secondaryColor(currentCommand_),
-    colorMix
+    scale8(envelope, mixLevel(92U, 148U, modulation.activity))
   );
-
-  for (uint8_t i = 0; i < kLedCount; ++i) {
-    gStripLeds[i] = scaleColor(pulseColor, level);
-  }
+  fill_solid(gStripLeds, kLedCount, scaleColor(color, level));
 }
 
-void RgbStripRenderer::renderRunnerFlicker(uint32_t now) {
-  const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0) ? 4U : beatsPerBar_;
-  const uint8_t safeBeatInBar = (beatInBar_ == 0) ? 1U : beatInBar_;
+void RgbStripRenderer::renderRiserPulse(uint32_t now) {
+  const uint32_t beatIntervalMs = (beatIntervalMs_ == 0U) ? 500U : beatIntervalMs_;
+  const uint8_t safeBeatInBar = (beatInBar_ == 0U) ? 1U : beatInBar_;
+  const uint8_t startBeat = (currentCommand_.triggerBeat == 0U || currentCommand_.triggerBeat > 4U)
+    ? 1U : currentCommand_.triggerBeat;
+  const uint32_t phraseDurationMs = 4U * beatIntervalMs;
   const uint32_t absoluteBeatIndex =
-    ((currentBar_ == 0 ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(safeBeatsPerBar) +
+    ((currentBar_ == 0U ? 1U : currentBar_) - 1U) * static_cast<uint32_t>(beatsPerBar_ == 0U ? 4U : beatsPerBar_) +
     static_cast<uint32_t>(safeBeatInBar - 1U);
-  const bool swapPattern = (absoluteBeatIndex & 1U) != 0U;
-  const bool reverseRunner = (absoluteBeatIndex & 1U) == 0U;
+  const uint32_t phraseBeatIndex =
+    (absoluteBeatIndex + 4U - static_cast<uint32_t>(startBeat - 1U)) % 4U;
+  uint32_t elapsedBeatMs = now - beatStartedAtMs_;
+  if (elapsedBeatMs > beatIntervalMs) elapsedBeatMs = beatIntervalMs;
+  const uint32_t elapsedPhraseMs = min(phraseBeatIndex * beatIntervalMs + elapsedBeatMs, phraseDurationMs);
+  const uint8_t phase = static_cast<uint8_t>((elapsedPhraseMs * 255UL) / phraseDurationMs);
+  const SurfaceModulationState modulation = surfaceModulationState(now);
+  const uint8_t envelope = scale8(
+    riserPulseEnvelope8(phase),
+    mixLevel(210U, 255U, modulation.activity)
+  );
+  const uint8_t level = mixLevel(currentCommand_.floorLevel, currentCommand_.peakLevel, envelope);
+  const CRGB color = blend(
+    primaryColor(currentCommand_),
+    secondaryColor(currentCommand_),
+    scale8(envelope, mixLevel(120U, 188U, modulation.activity))
+  );
+  fill_solid(gStripLeds, kLedCount, scaleColor(color, level));
+}
+
+void RgbStripRenderer::renderRunner(uint32_t now) {
   const uint32_t beatIntervalMs = (beatIntervalMs_ == 0) ? 500U : beatIntervalMs_;
   uint32_t elapsedBeatMs = now - beatStartedAtMs_;
   if (elapsedBeatMs > beatIntervalMs) {
     elapsedBeatMs = beatIntervalMs;
   }
-  const uint8_t beatPhase = static_cast<uint8_t>((elapsedBeatMs * 255UL) / beatIntervalMs);
-  const SurfaceModulationState modulation = surfaceModulationState(now);
-  const uint8_t runnerHead = reverseRunner ? static_cast<uint8_t>(255U - beatPhase) : beatPhase;
-  const uint8_t echoHead = static_cast<uint8_t>(runnerHead + (reverseRunner ? 40U : 216U));
-  const CRGB primary = primaryColor(currentCommand_);
-  const CRGB secondary = secondaryColor(currentCommand_);
-  const CRGB highlight = blend(
-    secondary,
-    CRGB(136, 220, 255),
-    mixLevel(68U, 144U, modulation.activity)
-  );
-  const uint8_t bodySwing = scale8(
-    wave8FromProgress(static_cast<uint8_t>(beatPhase + 32U)),
-    mixLevel(18U, 72U, modulation.activity)
-  );
+  const uint8_t phase = static_cast<uint8_t>((elapsedBeatMs * 255UL) / beatIntervalMs);
+  const uint8_t bandCount = currentCommand_.runnerBandCount > decaflash::kMaxRunnerBands
+    ? decaflash::kMaxRunnerBands : currentCommand_.runnerBandCount;
+  const bool loops = currentCommand_.runnerMotion == decaflash::RunnerMotion::Loop;
+  const bool sequencesBands =
+    currentCommand_.runnerPresentation == decaflash::RunnerPresentation::Sequence;
+  const uint8_t safeBeatsPerBar = (beatsPerBar_ == 0U) ? 4U : beatsPerBar_;
+  const uint8_t safeBeatInBar = (beatInBar_ == 0U) ? 1U : beatInBar_;
+  const uint32_t absoluteBeatIndex =
+    ((currentBar_ == 0U ? 1U : currentBar_) - 1U) * safeBeatsPerBar + (safeBeatInBar - 1U);
+  const uint8_t loopProgressPercent = static_cast<uint8_t>((static_cast<uint16_t>(phase) * 100U) / 256U);
+  const uint8_t activeSequenceBand = bandCount == 0U
+    ? 0U : static_cast<uint8_t>(absoluteBeatIndex % bandCount);
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
-    const bool usePrimary = ((i + (swapPattern ? 1U : 0U)) % 2U) == 0U;
-    const uint8_t pixelPosition = ledPosition8(i);
-    const uint8_t runnerMix = proximityMix8(pixelPosition, runnerHead, 68U);
-    const uint8_t echoMix = scale8(
-      proximityMix8(pixelPosition, echoHead, 88U),
-      mixLevel(44U, 148U, modulation.activity)
+    const uint8_t pixelPositionPercent = static_cast<uint8_t>(
+      (static_cast<uint16_t>(i) * 100U) / kLedCount
     );
-    const uint8_t activityMix = max(runnerMix, echoMix);
-    const uint8_t level = mixLevel(
-      currentCommand_.baseLevel,
-      currentCommand_.peakLevel,
-      max(bodySwing, activityMix)
+    uint8_t strongestMix = 0U;
+    uint8_t strongestBand = 0U;
+    for (uint8_t band = 0; band < bandCount; ++band) {
+      if (sequencesBands && band != activeSequenceBand) {
+        continue;
+      }
+      const decaflash::RgbRunnerBand& configuredBand = currentCommand_.runnerBands[band];
+      uint8_t mix = 0U;
+      if (loops) {
+        const uint8_t bandStartPercent = static_cast<uint8_t>(
+          (loopProgressPercent + configuredBand.phasePercent) % 100U
+        );
+        const uint8_t positionInBandPercent = static_cast<uint8_t>(
+          (pixelPositionPercent + 100U - bandStartPercent) % 100U
+        );
+        mix = bandLevel8(
+          positionInBandPercent,
+          configuredBand.widthPercent,
+          configuredBand.edgePercent
+        );
+      } else {
+        const uint16_t bandOffset =
+          (static_cast<uint16_t>(configuredBand.phasePercent) * 510U) / 100U;
+        const uint16_t bouncePhase = static_cast<uint16_t>(
+          (absoluteBeatIndex * 255UL + phase + bandOffset) % 510U
+        );
+        const uint8_t centerPercent = bouncePhase <= 255U
+          ? static_cast<uint8_t>(bouncePhase)
+          : static_cast<uint8_t>(510U - bouncePhase);
+        const uint8_t centerPositionPercent = static_cast<uint8_t>(
+          (static_cast<uint16_t>(centerPercent) * 100U) / 255U
+        );
+        const uint8_t distancePercent = pixelPositionPercent > centerPositionPercent
+          ? static_cast<uint8_t>(pixelPositionPercent - centerPositionPercent)
+          : static_cast<uint8_t>(centerPositionPercent - pixelPositionPercent);
+        mix = centeredBandLevel8(
+          distancePercent,
+          configuredBand.widthPercent,
+          configuredBand.edgePercent
+        );
+      }
+      if (mix > strongestMix) {
+        strongestMix = mix;
+        strongestBand = band;
+      }
+    }
+
+    const uint8_t level = mixLevel(currentCommand_.floorLevel, currentCommand_.peakLevel, strongestMix);
+    const decaflash::RgbRunnerBand& strongestConfiguredBand =
+      currentCommand_.runnerBands[strongestBand];
+    const CRGB bandColor = CRGB(
+      strongestConfiguredBand.r,
+      strongestConfiguredBand.g,
+      strongestConfiguredBand.b
     );
-    const CRGB laneColor = blend(
-      usePrimary ? primary : secondary,
-      highlight,
-      static_cast<uint8_t>(activityMix / 2U)
-    );
-    gStripLeds[i] = scaleColor(laneColor, level);
+    gStripLeds[i] = scaleColor(bandColor, level);
   }
 }
 
@@ -680,7 +815,9 @@ void RgbStripRenderer::applySurfaceModulation(uint32_t now) {
       ? static_cast<uint8_t>((colorDrift - 127U) * 2U)
       : static_cast<uint8_t>((127U - colorDrift) * 2U);
   const uint8_t colorDriftLimit =
-    (currentCommand_.pattern == decaflash::RgbPattern::Accent) ? 20U : 60U;
+    (currentCommand_.pattern == decaflash::RgbPattern::PulseRow ||
+     currentCommand_.pattern == decaflash::RgbPattern::Heartbeat ||
+     currentCommand_.pattern == decaflash::RgbPattern::RiserPulse) ? 20U : 60U;
   const uint8_t colorDriftMix = scale8(distanceFromCenter, colorDriftLimit);
 
   for (uint8_t i = 0; i < kLedCount; ++i) {
@@ -703,28 +840,4 @@ void RgbStripRenderer::applySurfaceModulation(uint32_t now) {
       gStripLeds[i].nscale8_video(mixLevel(124U, 76U, shadowDepth));
     }
   }
-}
-
-uint8_t RgbStripRenderer::accentLevel(uint32_t now, uint8_t low, uint8_t high) const {
-  if (high <= low || accentEndsAtMs_ == 0 || now >= accentEndsAtMs_) {
-    return low;
-  }
-
-  const uint32_t accentDurationMs = accentEndsAtMs_ - accentStartedAtMs_;
-  if (accentDurationMs == 0) {
-    return high;
-  }
-
-  const uint32_t elapsedMs = now - accentStartedAtMs_;
-  if (elapsedMs >= accentDurationMs) {
-    return low;
-  }
-
-  const uint8_t wave = 255U - static_cast<uint8_t>((elapsedMs * 255UL) / accentDurationMs);
-  const uint8_t span = high - low;
-  return low + scale8(span, ease8InOutCubic(wave));
-}
-
-uint8_t RgbStripRenderer::clampLevel(uint16_t level) const {
-  return static_cast<uint8_t>(level > 255U ? 255U : level);
 }

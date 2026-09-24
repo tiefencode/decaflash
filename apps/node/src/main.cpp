@@ -19,6 +19,8 @@ using decaflash::NodeIdentity;
 using decaflash::NodeKind;
 using decaflash::RgbCommand;
 using decaflash::RgbPattern;
+using decaflash::RunnerMotion;
+using decaflash::RunnerPresentation;
 using decaflash::espnow_transport::ensureBroadcastPeer;
 using decaflash::espnow_transport::initEspNow;
 using decaflash::espnow_transport::isValidHeader;
@@ -80,19 +82,18 @@ static constexpr FlashRenderCommand REMOTE_IDLE_FLASH_RENDER_COMMAND = {
 static constexpr RgbCommand REMOTE_IDLE_RGB_COMMAND = {
   "Remote Idle",
   RgbPattern::Off,
+  0, 0, 0,
+  0, 0, 0,
+  0, 0, 0,
+  1, 1,
+  0, 1200, 0,
   0,
   0,
+  1, 0, 255,
+  RunnerMotion::Bounce,
+  RunnerPresentation::Parallel,
   0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  1,
-  1,
-  1200,
-  0,
+  {},
 };
 
 NodeIdentity nodeIdentity = {
@@ -1360,13 +1361,13 @@ void onBeat() {
       );
 
       switch (activeFlashRenderCommand.pattern) {
-        case FlashPattern::BeatPulse:
+        case FlashPattern::Pulse:
           if (trigger && activeFlashRenderCommand.flashDurationMs > 0) {
             renderer.flash100(activeFlashRenderCommand.flashDurationMs);
           }
           break;
 
-        case FlashPattern::BarBurst:
+        case FlashPattern::PulseRow:
           if (trigger) {
             startFlashBurst(activeFlashRenderCommand);
           }
@@ -1378,23 +1379,23 @@ void onBeat() {
           break;
       }
     } else {
-      bool trigger = false;
       switch (activeRgbCommand.pattern) {
-        case RgbPattern::RunnerFlicker:
-          trigger = isTriggerBeat(activeRgbCommand.triggerEveryBars, activeRgbCommand.triggerBeat);
+        case RgbPattern::PulseRow:
+          if (isTriggerBeat(activeRgbCommand.triggerEveryBars, activeRgbCommand.triggerBeat)) {
+            renderer.triggerRgbPulseRow();
+          }
           break;
 
-        case RgbPattern::BeatPulse:
-        case RgbPattern::Accent:
-        case RgbPattern::BarWave:
+        // A runner is continuously beat-clocked by the RGB renderer. It has no
+        // one-shot trigger to schedule here.
+        case RgbPattern::Runner:
+        case RgbPattern::Pulse:
+        case RgbPattern::Heartbeat:
+        case RgbPattern::RiserPulse:
+        case RgbPattern::Wave:
         case RgbPattern::Off:
         default:
-          trigger = false;
           break;
-      }
-
-      if (trigger) {
-        renderer.triggerRgbAccent();
       }
     }
   }
